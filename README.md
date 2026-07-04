@@ -1,7 +1,19 @@
 # LennardJonesMD: A Minimal Molecular Dynamics Simulation in Python
 
 This project implements a velocity-Verlet and Langevin dynamics integrator for simulating Lennard-Jones particles in 3D. It supports both NVE and NVT ensembles and includes periodic boundary conditions, trajectory output, and energy diagnostics.
-## test
+
+## Assignment
+
+P01 — Cutoff and Neighbour List
+To improve computational efficiency, it's useful to calculate only interactions within a certain cutoff distance. Even calculating all distances is expensive; neighbour lists store for every particle the neighbours that lie within the cutoff distance. The neighbour list does not have to be updated at every MD step, which makes the code more efficient.
+
+    Implement a cutoff radius: only interactions within a user-defined distance are considered
+    Implement a neighbour list, with a keyword that defines how often it’s updated (every n MD steps)
+    Monitor the speedup compared to the original code, depending on cutoff and neighbour list update frequency
+    Measure the error due to particles leaving the neighbour list before updating it
+    Determine optimal values for performance vs. accuracy
+
+
 ## Features
 
 - Velocity Verlet (NVE) and BAOAB Langevin (NVT) integration
