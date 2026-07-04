@@ -7,7 +7,7 @@ Main program for running molecular dynamics simulations using Lennard-Jones part
 Initializes the system, runs the integrator loop, records energy and trajectory data, 
 and visualizes results.
 
-Author: Bettina Keller Test
+Author: Bettina Keller
 Created: May 28, 2025
 
 This script imports all classes and functions from md_simulation.py and controls
