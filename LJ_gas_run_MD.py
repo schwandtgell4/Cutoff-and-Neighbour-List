@@ -114,10 +114,10 @@ sim = SimulationParameters(dt = dt,
 ps = ParticleSystem(n_particles)
 
 # fill in the parameters for argon
-for i in range(n_particles): 
+for i in range(n_particles):
     ps.set_parameters(i, mass=mass_argon, sigma=sigma_argon, epsilon=epsilon_argon)
 
-# set initial positions     
+# set initial positions
 initialize_positions(ps, sim.box_length)
 
 # set initial velocities     

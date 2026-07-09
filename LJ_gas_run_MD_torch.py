@@ -40,6 +40,7 @@ from LJ_gas_torch import (
 #----------------------------------------------------------------
 #   F U N C T I O N S
 #----------------------------------------------------------------
+# Define tic and toc functions
 def tic():
     """Start a timer."""
     global _tic_time
@@ -48,6 +49,7 @@ def tic():
 
 def toc():
     """Stop the timer and return the elapsed time in seconds."""
+    
     elapsed_time = None
 
     if "_tic_time" in globals():
@@ -75,24 +77,22 @@ def save_plot(x, y, filename, xlabel, ylabel, y_margin):
 #----------------------------------------------------------------
 # system
 n_particles = 2000
-mass_argon = 39.95             # mass in u = 1e-3 kg/mol
-sigma_argon = 0.34             # sigma in nm
-epsilon_argon = 120 * R * 1e-3 # epsilon in kJ/mol
+mass_argon =  39.95             # mass in u = 1e-3 kg/mol
+sigma_argon = 0.34              # sigma in nm     Argon: 0.34
+epsilon_argon = 120*R*1e-3      # epsilon in kJ/mol Argon: 120
 
 # simulation
-dt = 0.1              # ps
-n_steps = 1000
+dt = 0.1             # ps
+n_steps = 1000 
 temperature = 300     # K
 box_length = 100      # nm
-tau_thermostat = 1    # thermostat coupling time in ps
-rij_min = 1e-2        # nm
-NVT = True            # True: NVT, False: NVE
+tau_thermostat = 1  # thermostat coupling constant in 1/ps
+rij_min = 1e-2      # nm
+NVT = True          # switch to decide between NVT and NVE
 use_cutoff = True
-
-# 2.5*sigma is the common LJ starting value. You used 20.5*sigma in your file;
-# keep that here as an explicit test value for your low-density box.
 r_cut_factor = 20.5
-r_cut = r_cut_factor * sigma_argon  # cutoff radius in nm
+r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at page 15 of lecture script
+                            # sigma is LJ length scale and with 2.5 as factor
 
 # output
 file_name_base = "my_simulation_torch"
@@ -104,16 +104,15 @@ file_name_base = "my_simulation_torch"
 tic()
 
 # initialize simulation parameters
-sim = SimulationParameters(
-    dt=dt,
-    n_steps=n_steps,
-    temperature=temperature,
-    box_length=box_length,
-    tau_thermostat=tau_thermostat,
-    rij_min=rij_min,
-    r_cut=r_cut,
-    use_cutoff=use_cutoff,
-)
+sim = SimulationParameters(dt = dt, 
+                           n_steps = n_steps, 
+                           temperature = temperature, 
+                           box_length = box_length, 
+                           tau_thermostat = tau_thermostat,
+                           rij_min=rij_min,
+                           r_cut = r_cut,
+                           use_cutoff = use_cutoff
+                           )
 
 # initialize ParticleSystem
 ps = ParticleSystem(n_particles)
@@ -122,7 +121,7 @@ ps = ParticleSystem(n_particles)
 for i in range(n_particles):
     ps.set_parameters(i, mass=mass_argon, sigma=sigma_argon, epsilon=epsilon_argon)
 
-# set initial positions and velocities with NumPy first
+# set initial positions
 initialize_positions(ps, sim.box_length)
 initialize_velocities(ps, sim.temperature)
 
