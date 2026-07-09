@@ -38,7 +38,8 @@ from LJ_gas import(
     potential_energy,
     kinetic_energy,
     instantaneous_temperature,
-    ideal_gas_pressure
+    ideal_gas_pressure,
+    cutoff_pair_statistics # statistics
     )
 
 #----------------------------------------------------------------
@@ -68,7 +69,7 @@ def toc():
 #   P A R A M E T E R S
 #----------------------------------------------------------------
 # system
-n_particles = 200
+n_particles = 2000
 mass_argon =  39.95             # mass in u = 1e-3 kg/mol
 sigma_argon = 0.34              # sigma in nm     Argon: 0.34
 epsilon_argon = 120*R*1e-3      # epsilon in kJ/mol Argon: 120
@@ -81,6 +82,9 @@ box_length = 100      # nm
 tau_thermostat = 1  # thermostat coupling constant in 1/ps
 rij_min = 1e-2      # nm
 NVT = True          # switch to decide between NVT and NVE
+use_cutoff = True
+r_cut = 20.5 * sigma_argon   # cutoff radius in nm; reference: (3.8) at page 15 of lecture script
+                            # sigma is LJ length scale and with 2.5 as factor
 
 # output
 file_name_base = "my_simulation"  # file name for all output files
@@ -99,7 +103,9 @@ sim = SimulationParameters(dt = dt,
                            temperature = temperature, 
                            box_length = box_length, 
                            tau_thermostat = tau_thermostat,
-                           rij_min=rij_min
+                           rij_min=rij_min,
+                           r_cut = r_cut,
+                           use_cutoff = use_cutoff
                            )
 
 #
@@ -123,6 +129,12 @@ calculate_force(ps, sim)
 # calculate box density
 rho = density(ps, sim)
 
+# calculate cutoff pair statistics for the initial configuration
+n_total, n_cut, percent_cut = cutoff_pair_statistics(ps, sim)
+
+print(f"r_cut = {sim.r_cut:.3f} nm")
+print(f"Pairs inside cutoff: {n_cut}/{n_total} ({percent_cut:.4f}%)")
+
 # calculate initial values of variable properties
 E_pot_init = potential_energy(ps, sim)
 E_kin_init = kinetic_energy(ps)
@@ -143,22 +155,31 @@ energy_trajectory[0,3] = ideal_gas_pressure(ps, sim)      # ideal gas pressure
 
 
 #--------------------------------------------------
-#  The acutal MD simulation
+#  The actual MD simulation
 #--------------------------------------------------
+print("Starting MD simulation...", flush=True)
+
 for i in range(sim.n_steps):
-    if NVT==True:
+    if NVT == True:
         simulate_NVT_step(ps, sim)
     else: 
         simulate_NVE_step(ps, sim)
         
     # store updated positions
-    position_trajectory[i+1,:,:] = ps.position # store updated positions
+    position_trajectory[i+1,:,:] = ps.position
 
     # store updated energies, temperature and pressure
-    energy_trajectory[i+1,0] = potential_energy( ps, sim)     # potential energy
-    energy_trajectory[i+1,1] = kinetic_energy(ps)             # kinetic energy
-    energy_trajectory[i+1,2] = instantaneous_temperature(ps)  # instantaneous pressure
-    energy_trajectory[i+1,3] = ideal_gas_pressure(ps, sim)    # ideal gas pressure
+    energy_trajectory[i+1,0] = potential_energy(ps, sim)
+    energy_trajectory[i+1,1] = kinetic_energy(ps)
+    energy_trajectory[i+1,2] = instantaneous_temperature(ps)
+    energy_trajectory[i+1,3] = ideal_gas_pressure(ps, sim)
+
+    # print progress every 10% of the simulation
+    if (i + 1) % max(1, sim.n_steps // 10) == 0:
+        percent = 100 * (i + 1) / sim.n_steps
+        print(f"Step {i+1}/{sim.n_steps} finished ({percent:.0f}%)", flush=True)
+
+print("MD simulation finished. Writing output files...", flush=True)
 
 
 #--------------------------------------
@@ -242,6 +263,11 @@ plt.show()
 # O U T P U T 
 #--------------------------------------
 elapsed_time = toc()   # stop the timer
+
+
+# calculate cutoff pair statistics for the final configuration
+n_total, n_cut, percent_cut = cutoff_pair_statistics(ps, sim)
+
 output_lines = []
 
 output_lines.append("")
@@ -267,6 +293,13 @@ else:
 
 output_lines.append("")     
 output_lines.append(f"{'Lower cutoff radius:':<30}{sim.rij_min:>10.3f} nm")
+
+output_lines.append(f"{'Use upper cutoff:':<30}{str(sim.use_cutoff):>10}")
+output_lines.append(f"{'Upper cutoff radius:':<30}{sim.r_cut:>10.3f} nm")
+output_lines.append(f"{'Total LJ pairs:':<30}{n_total:>10}")
+output_lines.append(f"{'Pairs inside cutoff:':<30}{n_cut:>10}")
+output_lines.append(f"{'Pairs inside cutoff [%]:':<30}{percent_cut:>10.4f}")
+
 output_lines.append("----------------------------------------------------------")
 if elapsed_time: 
     time_per_time_step = elapsed_time/sim.n_steps
