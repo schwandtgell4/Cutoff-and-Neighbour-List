@@ -148,7 +148,7 @@ def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: i
         raise ValueError("n_update must be at least 1")
 
     if not hasattr(ps, "neighbour_pairs"):
-        rcut = PLATZHALTER_VAR
+        rcut = r_cut
         skin = 0.3 * ps.sigma[0]
         ps.rcut = rcut
         ps.neighbour_skin = skin
