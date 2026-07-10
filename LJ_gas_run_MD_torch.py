@@ -89,7 +89,7 @@ box_length = 100      # nm
 tau_thermostat = 1  # thermostat coupling constant in 1/ps
 rij_min = 1e-2      # nm
 NVT = True          # switch to decide between NVT and NVE
-use_cutoff = False
+use_cutoff = True
 r_cut_factor = 20.5
 r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at page 15 of lecture script
                             # sigma is LJ length scale and with 2.5 as factor
