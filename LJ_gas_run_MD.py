@@ -32,6 +32,7 @@ from LJ_gas import(
     simulate_NVT_step,
     initialize_positions,
     initialize_velocities,
+    update_neighbour_list,
     calculate_force,
     density,
     write_xyz_trajectory,
@@ -81,6 +82,7 @@ box_length = 100      # nm
 tau_thermostat = 1  # thermostat coupling constant in 1/ps
 rij_min = 1e-2      # nm
 NVT = True          # switch to decide between NVT and NVE
+n_update = 10       # define how often list is updatet
 
 # output
 file_name_base = "my_simulation"  # file name for all output files
@@ -117,6 +119,8 @@ initialize_positions(ps, sim.box_length)
 # set initial velocities     
 initialize_velocities(ps, sim.temperature)
 
+update_neighbour_list(ps, sim, step=0, n_update=n_update) #first create of list 
+
 # calculate force according to initial positions
 calculate_force(ps, sim)
 
@@ -150,7 +154,9 @@ for i in range(sim.n_steps):
         simulate_NVT_step(ps, sim)
     else: 
         simulate_NVE_step(ps, sim)
-        
+
+        update_neighbour_list(ps, sim, step=i + 1, n_update=n_update) #update the list
+
     # store updated positions
     position_trajectory[i+1,:,:] = ps.position # store updated positions
 

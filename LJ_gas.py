@@ -140,6 +140,36 @@ def initialize_velocities(ps: ParticleSystem, temperature: float):
     
 
 #--------------------------------------
+# nachbarliste def
+#--------------------------------------
+
+def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int = 10):
+    if n_update < 1:
+        raise ValueError("n_update must be at least 1")
+
+    if not hasattr(ps, "neighbour_pairs"):
+        rcut = PLATZHALTER_VAR
+        skin = 0.3 * ps.sigma[0]
+        ps.rcut = rcut
+        ps.neighbour_skin = skin
+        ps.neighbour_pairs = np.empty((0, 2), dtype=int)
+        ps.neighbour_list_step = -n_update
+
+    if step == 0 or step - ps.neighbour_list_step >= n_update:
+        i, j = np.triu_indices(ps.n, k=1)
+        rij = ps.position[i] - ps.position[j]
+        rij -= sim.box_length * np.rint(rij / sim.box_length)
+        r2 = np.einsum("ij,ij->i", rij, rij)
+        mask = r2 < (ps.rcut + ps.neighbour_skin)**2
+        ps.neighbour_pairs = np.column_stack((i[mask], j[mask]))
+        ps.neighbour_list_step = step
+
+    return ps.neighbour_pairs
+
+
+
+
+#--------------------------------------
 # Energies
 #--------------------------------------
 
