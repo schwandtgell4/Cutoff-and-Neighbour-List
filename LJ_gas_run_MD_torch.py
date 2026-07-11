@@ -90,6 +90,7 @@ box_length = 100      # nm
 tau_thermostat = 1  # thermostat coupling constant in 1/ps
 rij_min = 1e-2      # nm
 NVT = True          # switch to decide between NVT and NVE
+n_update = 10       # define how often list is updated
 use_cutoff = True
 r_cut_factor = 20.5
 r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at page 15 of lecture script
@@ -194,17 +195,6 @@ for i in range(sim.n_steps):
             flush=True
         )
 
-    # print progress every 10% of the simulation
-    if (step + 1) % max(1, sim.n_steps // 10) == 0:
-        synchronize_device(device)
-        elapsed_md = time.time() - md_start_time
-        percent = 100 * (step + 1) / sim.n_steps
-        time_per_step = elapsed_md / (step + 1)
-        print(
-            f"Step {step+1}/{sim.n_steps} finished "
-            f"({percent:.0f}%), time/step = {time_per_step:.4f} s",
-            flush=True,
-        )
 
 synchronize_device(device)
 md_elapsed_time = time.time() - md_start_time
