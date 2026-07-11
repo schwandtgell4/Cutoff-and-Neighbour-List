@@ -32,6 +32,7 @@ from LJ_gas_torch import (
     ideal_gas_pressure,
     cutoff_pair_statistics,
     move_particle_system_to_torch,
+    update_neighbour_list,
     synchronize_device,
     tensor_to_numpy,
 )
@@ -103,15 +104,14 @@ file_name_base = "my_simulation_torch"
 #----------------------------------------------------------------
 tic()
 
-# initialize simulation parameters
 sim = SimulationParameters(dt = dt, 
                            n_steps = n_steps, 
                            temperature = temperature, 
                            box_length = box_length, 
                            tau_thermostat = tau_thermostat,
                            rij_min=rij_min,
-                           r_cut = r_cut,
-                           use_cutoff = use_cutoff
+                           r_cut=r_cut,
+                           use_cutoff=use_cutoff
                            )
 
 # initialize ParticleSystem
@@ -129,7 +129,8 @@ initialize_velocities(ps, sim.temperature)
 # Keep dtype=torch.float32 in LJ_gas_torch for better GPU compatibility and speed.
 device = move_particle_system_to_torch(ps)
 print("Using device:", device)
-
+# first create of neighbour list
+update_neighbour_list(ps, sim, step=0, n_update=n_update)
 # calculate force according to initial positions on the selected device
 calculate_force_torch(ps, sim)
 
@@ -167,20 +168,31 @@ print("Starting MD simulation...", flush=True)
 synchronize_device(device)
 md_start_time = time.time()
 
-for step in range(sim.n_steps):
-    if NVT:
+for i in range(sim.n_steps):
+    if NVT == True:
         simulate_NVT_step(ps, sim)
-    else:
+    else: 
         simulate_NVE_step(ps, sim)
 
-    # Copy positions to CPU only for output. This is convenient, but it costs time.
-    position_trajectory[step + 1, :, :] = tensor_to_numpy(ps.position)
+    update_neighbour_list(ps, sim, step=i + 1, n_update=n_update)
 
-    # Energies are returned as Python floats so they can be stored in NumPy arrays.
-    energy_trajectory[step + 1, 0] = potential_energy(ps, sim)
-    energy_trajectory[step + 1, 1] = kinetic_energy(ps)
-    energy_trajectory[step + 1, 2] = instantaneous_temperature(ps)
-    energy_trajectory[step + 1, 3] = ideal_gas_pressure(ps, sim)
+    # store updated positions
+    position_trajectory[i+1,:,:] = tensor_to_numpy(ps.position)
+
+    # store updated energies, temperature and pressure
+    energy_trajectory[i+1,0] = potential_energy(ps, sim)
+    energy_trajectory[i+1,1] = kinetic_energy(ps)
+    energy_trajectory[i+1,2] = instantaneous_temperature(ps)
+    energy_trajectory[i+1,3] = ideal_gas_pressure(ps, sim)
+
+    # print progress every 10% of the simulation
+    if (i + 1) % max(1, sim.n_steps // 10) == 0:
+        percent = 100 * (i + 1) / sim.n_steps
+        print(
+            f"Step {i+1}/{sim.n_steps} finished "
+            f"({percent:.0f}%)",
+            flush=True
+        )
 
     # print progress every 10% of the simulation
     if (step + 1) % max(1, sim.n_steps // 10) == 0:

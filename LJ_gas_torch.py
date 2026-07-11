@@ -216,6 +216,50 @@ def initialize_velocities(ps: ParticleSystem, temperature: float):
     ps.velocity -= v_cm
 
 
+#--------------------------------------
+# nachbarliste def
+#--------------------------------------
+
+def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int = 10):
+    if n_update < 1:
+        raise ValueError("n_update must be at least 1")
+
+    if not hasattr(ps, "neighbour_pairs"):
+        rcut = sim.r_cut
+        skin = 0.3 * ps.sigma[0]
+        ps.rcut = rcut
+        ps.neighbour_skin = skin
+        ps.neighbour_pairs = torch.empty(
+            (0, 2),
+            dtype=torch.long,
+            device=ps.position.device
+        )
+        ps.neighbour_list_step = -n_update
+
+    if step == 0 or step - ps.neighbour_list_step >= n_update:
+        i, j = torch.triu_indices(
+            ps.n,
+            ps.n,
+            offset=1,
+            device=ps.position.device
+        )
+
+        rij = ps.position[i] - ps.position[j]
+        rij -= sim.box_length * torch.round(rij / sim.box_length)
+
+        r2 = torch.einsum("ij,ij->i", rij, rij)
+
+        mask = r2 < (ps.rcut + ps.neighbour_skin)**2
+
+        ps.neighbour_pairs = torch.column_stack(
+            (i[mask], j[mask])
+        )
+
+        ps.neighbour_list_step = step
+
+    return ps.neighbour_pairs
+
+
 #----------------------------------------------------------------
 #   E N E R G I E S / P R O P E R T I E S
 #----------------------------------------------------------------
