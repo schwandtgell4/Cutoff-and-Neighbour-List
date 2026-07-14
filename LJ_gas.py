@@ -72,8 +72,8 @@ class ParticleSystem:
 
 
 class SimulationParameters:
-    def __init__(self, dt, n_steps, temperature, box_length, tau_thermostat = None, rij_min=0.0, r_cut=None, use_cutoff=False):
-        """
+    def __init__(self, dt, n_steps, temperature, box_length, tau_thermostat=None, rij_min=0.0, r_cut=None, use_cutoff=False):
+        """ 
         Parameters:
             dt (float): Time step in ps.
             n_steps (int): Number of time steps.
@@ -160,29 +160,181 @@ def initialize_velocities(ps: ParticleSystem, temperature: float):
 # nachbarliste def
 #--------------------------------------
 
-def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int = 10):
+def update_neighbour_list(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    step: int,
+    n_update: int = 10
+):
+    """Update the neighbour list every n_update MD steps."""
+
     if n_update < 1:
         raise ValueError("n_update must be at least 1")
 
-    if not hasattr(ps, "neighbour_pairs"):
-        rcut = sim.r_cut
-        skin = 0.3 * ps.sigma[0]
-        ps.rcut = rcut 
-        ps.neighbour_skin = skin
-        ps.neighbour_pairs = np.empty((0, 2), dtype=int)
-        ps.neighbour_list_step = -n_update
+    if not sim.use_cutoff or sim.r_cut is None:
+        raise ValueError(
+            "neighbour list requires use_cutoff=True and r_cut"
+        )
 
-    if step == 0 or step - ps.neighbour_list_step >= n_update:
-        i, j = np.triu_indices(ps.n, k=1)
-        rij = ps.position[i] - ps.position[j]
-        rij -= sim.box_length * np.rint(rij / sim.box_length)
-        r2 = np.einsum("ij,ij->i", rij, rij)
-        mask = r2 < (ps.rcut + ps.neighbour_skin)**2
-        ps.neighbour_pairs = np.column_stack((i[mask], j[mask]))
-        ps.neighbour_list_step = step
+    first_build = not hasattr(ps, "neighbour_pairs")
+
+    if not first_build and step % n_update != 0:
+        return ps.neighbour_pairs
+
+    if first_build:
+        ps.neighbour_skin = 0.3 * ps.sigma[0]
+        ps.neighbour_pairs = np.empty(
+            (0, 2),
+            dtype=np.int64
+        )
+        ps.neighbour_list_step = -1
+        ps.neighbour_rebuilds = 0
+
+    box_length = sim.box_length
+
+    list_cutoff = sim.r_cut + ps.neighbour_skin
+    list_cutoff_squared = list_cutoff * list_cutoff
+
+
+    n_cells = max(
+        1,
+        int(box_length / list_cutoff)
+    )
+
+    cell_length = box_length / n_cells
+
+    
+    cell_xyz = np.floor(
+        ps.position / cell_length
+    ).astype(np.int64)
+
+    cell_xyz %= n_cells
+
+    
+    cell_id = (
+        cell_xyz[:, 0]
+        + n_cells
+        * (
+            cell_xyz[:, 1]
+            + n_cells * cell_xyz[:, 2]
+        )
+    )
+
+    # Store only occupied cells.
+    occupied_cells = {}
+
+    for particle_index, current_cell_id in enumerate(cell_id):
+        occupied_cells.setdefault(
+            int(current_cell_id),
+            []
+        ).append(particle_index)
+
+    
+    cell_offsets = tuple(
+        (dx, dy, dz)
+        for dx in (-1, 0, 1)
+        for dy in (-1, 0, 1)
+        for dz in (-1, 0, 1)
+    )
+
+    pair_blocks = []
+
+    for i in range(ps.n):
+        cx, cy, cz = cell_xyz[i]
+
+        
+        neighbour_cell_ids = set()
+
+        for dx, dy, dz in cell_offsets:
+            nx = (cx + dx) % n_cells
+            ny = (cy + dy) % n_cells
+            nz = (cz + dz) % n_cells
+
+            current_cell_id = (
+                nx
+                + n_cells
+                * (
+                    ny
+                    + n_cells * nz
+                )
+            )
+
+            neighbour_cell_ids.add(
+                int(current_cell_id)
+            )
+
+        candidates = []
+
+        for current_cell_id in neighbour_cell_ids:
+            particles = occupied_cells.get(
+                current_cell_id
+            )
+
+            if particles is not None:
+                candidates.extend(particles)
+
+        if not candidates:
+            continue
+
+        candidates = np.asarray(
+            candidates,
+            dtype=np.int64
+        )
+
+        
+        candidates = candidates[candidates > i]
+
+        if candidates.size == 0:
+            continue
+
+        rij = (
+            ps.position[i]
+            - ps.position[candidates]
+        )
+
+        rij -= box_length * np.rint(
+            rij / box_length
+        )
+
+        r_squared = np.einsum(
+            "ij,ij->i",
+            rij,
+            rij
+        )
+
+        neighbours = candidates[
+            r_squared <= list_cutoff_squared
+        ]
+
+        if neighbours.size > 0:
+            pair_blocks.append(
+                np.column_stack(
+                    (
+                        np.full(
+                            neighbours.size,
+                            i,
+                            dtype=np.int64
+                        ),
+                        neighbours
+                    )
+                )
+            )
+
+    if pair_blocks:
+        ps.neighbour_pairs = np.concatenate(
+            pair_blocks,
+            axis=0
+        )
+    else:
+        ps.neighbour_pairs = np.empty(
+            (0, 2),
+            dtype=np.int64
+        )
+
+    ps.neighbour_list_step = step
+    ps.neighbour_rebuilds += 1
 
     return ps.neighbour_pairs
-
 
 
 
@@ -190,61 +342,18 @@ def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: i
 # Energies
 #--------------------------------------
 
-def potential_energy(ps: ParticleSystem, sim: SimulationParameters) -> float:
-    """
-    Computes the total Lennard-Jones potential energy of the system.
-    
-    Assumes uniform Lennard-Jones parameters:
-        epsilon and sigma (taken from particle 0)
-    
-    Units:
-        Energy is in the same units as epsilon (kJ/mol).
-        Positions must be in the same units as sigma (nm).
-    """
-    n_particles = ps.n
-    sigma = ps.sigma[0]
-    epsilon = ps.epsilon[0]
-    L = sim.box_length
-        
-    # vectorized code to calculate the pairwise distances
-    # positions[:, np.newaxis, :] has shape (N, 1, 3)
-    # positions[np.newaxis, :, :] has shape (1, N, 3)
-    # The difference broadcasted has shape (N, N, 3)
-    rij_matrix = ps.position[:, np.newaxis, :] - ps.position[np.newaxis, :, :]
-    
-    # apply periodic boundary conditions
-    rij_matrix -= L * np.rint(rij_matrix / L)
-    
-    # Pairwise distances (shape: N, N)
-    r_matrix = np.linalg.norm(rij_matrix, axis=-1)  
+def potential_energy(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+) -> float:
+    """Return the energy calculated together with the forces."""
 
-    # Extract upper triangle indices (i < j), i.e. the list of unique pairs
-    i_upper = np.triu_indices(n_particles, k=1)
-    
-    # Get list of unique distance vectors and unique distances
-    r = r_matrix[i_upper]                           # shape (N_pairs,)
+    if not hasattr(ps, "current_potential_energy"):
+        raise ValueError(
+            "forces must be calculated before potential_energy"
+        )
 
-    # Apply cutoff:
-    if sim.use_cutoff and sim.r_cut is not None: # make sure to use cutoff
-        cutoff_mask = r <= sim.r_cut # decide which pairs to keep
-        r = r[cutoff_mask] # keep only distances within the cutoff
-
-    # If no pair is inside the cutoff, potential energy is zero
-    if r.size == 0:
-        return 0.0
-
-    # reset the very small distance to 0.00001 nm to make sure
-    # that the sr6**2 term is numerically stable
-    r = np.clip(r, sim.rij_min, None)
-    
-    # Compute Lennard-Jones potential for each unique pair
-    sr6 = (sigma / r)**6
-    lj_pairwise = 4 * epsilon * (sr6**2 - sr6)
-
-    # Total potential energy
-    E_pot = np.sum(lj_pairwise)
-    
-    return E_pot
+    return float(ps.current_potential_energy)
 
 def kinetic_energy(ps: ParticleSystem) -> float:
     """
@@ -328,140 +437,171 @@ def ideal_gas_pressure(ps: ParticleSystem, sim: SimulationParameters) -> float:
 # MD integrators
 #--------------------------------------
 
-def calculate_force(ps: ParticleSystem, sim: SimulationParameters):
-    """
-    Computes and assigns Lennard-Jones forces between all unique particle pairs.
+def calculate_force(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+):
+    """Calculate LJ forces using the current neighbour list."""
 
-    Assumes:
-        - Pairwise interactions use identical sigma and epsilon values.
-        - Positions are in units compatible with sigma (e.g. nm).
-        - Returns no value; updates ps.force in-place (shape: (N, 3)).
-    """
-    
-    n_particles = ps.n
+    if not hasattr(ps, "neighbour_pairs"):
+        raise ValueError(
+            "neighbour list was not created"
+        )
+
+    if ps.neighbour_pairs.shape[0] == 0:
+        ps.force.fill(0.0)
+        ps.current_potential_energy = 0.0
+        return None
+
+    i_pairs = ps.neighbour_pairs[:, 0]
+    j_pairs = ps.neighbour_pairs[:, 1]
+
+    # Distance vectors for neighbour-list pairs.
+    rij = (
+        ps.position[i_pairs]
+        - ps.position[j_pairs]
+    )
+
+    rij -= sim.box_length * np.rint(
+        rij / sim.box_length
+    )
+
+    # Squared distances avoid unnecessary square roots.
+    r_squared = np.einsum(
+        "ij,ij->i",
+        rij,
+        rij
+    )
+
+    # Apply the exact cutoff.
+    inside_cutoff = (
+        r_squared
+        <= sim.r_cut * sim.r_cut
+    )
+
+    if not np.any(inside_cutoff):
+        ps.force.fill(0.0)
+        ps.current_potential_energy = 0.0
+        return None
+
+    i_pairs = i_pairs[inside_cutoff]
+    j_pairs = j_pairs[inside_cutoff]
+    rij = rij[inside_cutoff]
+    r_squared = r_squared[inside_cutoff]
+
+    minimum_r_squared = max(
+        sim.rij_min * sim.rij_min,
+        1e-24
+    )
+
+    r_squared = np.maximum(
+        r_squared,
+        minimum_r_squared
+    )
+
     sigma = ps.sigma[0]
     epsilon = ps.epsilon[0]
-    L = sim.box_length
 
+    inverse_r_squared = 1.0 / r_squared
 
-    # vectorized code to calculate the pairwise distances
-    # positions[:, np.newaxis, :] has shape (N, 1, 3)
-    # positions[np.newaxis, :, :] has shape (1, N, 3)
-    # The difference broadcasted has shape (N, N, 3)
-    rij_matrix = ps.position[:, np.newaxis, :] - ps.position[np.newaxis, :, :]
-    
-    # apply periodic boundary conditions
-    rij_matrix -= L * np.rint(rij_matrix / L)
-    
-    # Pairwise distances (shape: N, N)
-    r_matrix = np.linalg.norm(rij_matrix, axis=-1)  
+    sigma_over_r_squared = (
+        sigma
+        * sigma
+        * inverse_r_squared
+    )
 
-    # Extract upper triangle indices (i < j), i.e. the list of unique pairs
-    i_upper = np.triu_indices(n_particles, k=1)
-    
-    # Get list of unique distance vectors and unique distances
-    rij = rij_matrix[i_upper]                       # shape (N_pairs, 3)    
-    r = r_matrix[i_upper]                           # shape (N_pairs,)
+    sr6 = sigma_over_r_squared**3
+    sr12 = sr6 * sr6
 
-    # Store the particle indices for all pairs
-    i_pairs = i_upper[0]
-    j_pairs = i_upper[1]
+    # Force on particle i:
+    # F_i = 24 epsilon / r^2
+    #       * (2 (sigma/r)^12 - (sigma/r)^6)
+    #       * r_ij
+    force_factor = (
+        24.0
+        * epsilon
+        * inverse_r_squared
+        * (2.0 * sr12 - sr6)
+    )
 
-    # Apply upper cutoff:
-    if sim.use_cutoff and sim.r_cut is not None: # make sure to use cutoff
-        cutoff_mask = r <= sim.r_cut # assign each pair True/False, whether in- our outside cutoff
-        rij = rij[cutoff_mask] # keep distance vectors for pairs inside the cutoff
-        r = r[cutoff_mask] # keep distances within the cutoff
-        i_pairs = i_pairs[cutoff_mask] # keep first particle indices of remaining pairs
-        j_pairs = j_pairs[cutoff_mask] # keep second particle indices of remaining pairs
+    pair_force = (
+        force_factor[:, np.newaxis]
+        * rij
+    )
 
-    # If no pair is inside the cutoff => all forces are zero
-    if r.size == 0:
-        ps.force = np.zeros_like(ps.position)
-        return None
-    
-    # reset distances < rij_min  to rij_min to make sure
-    # that the sr6**2 term is numerically stable
-    r = np.clip(r, sim.rij_min, None)
-    
-    # Normalize rij to unit vectors and rescale to match clipped r
-    rij = rij / np.linalg.norm(rij, axis=1)[:, np.newaxis]  # normalize each rij
-    rij *= r[:, np.newaxis]                                 # rescale to clipped r
+    # Accumulate the pair forces without a Python loop
+    # over all interacting pairs.
+    for dimension in range(3):
+        force_on_i = np.bincount(
+            i_pairs,
+            weights=pair_force[:, dimension],
+            minlength=ps.n
+        )
 
-    # Lennard-Jones force magnitude: dV/dr
-    sr6 = (sigma / r)**6                            # shape (N_pairs,)
-    dV_dr = 24 * epsilon / r * (-2 * sr6**2 + sr6)  # shape (N_pairs,)
+        force_on_j = np.bincount(
+            j_pairs,
+            weights=pair_force[:, dimension],
+            minlength=ps.n
+        )
 
-    # Force vectors: shape (N_pairs, 3)
-    # dV_dr[:, np.newaxis] shapes it to (N_pairs, 1), i.e. 2D column vector
-    # broadcasting to rij with shape (N_pairs, 3) is then possible
-    f_ij = (dV_dr[:, np.newaxis] / r[:, np.newaxis]) * rij
+        ps.force[:, dimension] = (
+            force_on_i - force_on_j
+        )
 
-    # Initialize total force array
-    force = np.zeros_like(ps.position)  # shape (N, 3)
+    # Calculate and store the potential energy from the
+    # already available distance values.
+    ps.current_potential_energy = float(
+        np.sum(
+            4.0
+            * epsilon
+            * (sr12 - sr6)
+        )
+    )
 
-    # Distribute pairwise forces to particle i and j
-    # After applying cutoff i_pairs and j_pairs contain only the remaining pairs.
-    # Newton's third law: the force on j is equal and opposite to the force on i.
-    for idx, (i, j) in enumerate(zip(i_pairs, j_pairs)):
-        force[i] -= f_ij[idx]
-        force[j] += f_ij[idx]
+    return None
 
-    # update the force vector in the ParticleSystem class
-    ps.force = force
+def A_step(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    half_step=False
+):
+    """Update particle positions."""
 
-def A_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
-    """
-    Performs the A-step (position update) of an MD integration scheme.
+    dt = (
+        0.5 * sim.dt
+        if half_step
+        else sim.dt
+    )
 
-    This step updates particle positions using the current velocities:
-    r(t + Δt) = r(t) + v(t) * Δt
+    ps.position += ps.velocity * dt
 
-    Parameters:
-        - ps (ParticleSystem): The particle system containing positions and velocities.
-        - sim (SimulationParameters): Simulation settings, including the time step.
-        - half_step (bool): If True, performs a half step (Δt / 2) instead of a full step.
+    return None
 
-    Returns:
-        None. Updates ps.position in-place.
-    """
-    # set time step, depending on whether a half- or full step is performed
-    if half_step == True:
-        dt = 0.5 * sim.dt
-    else:
-        dt = sim.dt
-        
-    ps.position = ps.position + ps.velocity * dt
-    
-    return None    
+def B_step(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    half_step=False
+):
+    """Update particle velocities."""
 
-def B_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
-    """
-    Performs the B-step (velocity update) of an MD integration scheme.
+    dt = (
+        0.5 * sim.dt
+        if half_step
+        else sim.dt
+    )
 
-    This step updates particle velocities using the current forces:
-    v(t + Δt) = v(t) + 1/m * Δt * F(t) 
- 
-    Parameters:
-        - ps (ParticleSystem): The particle system containing positions and velocities.
-        - sim (SimulationParameters): Simulation settings, including the time step.
-        - half_step (bool): If True, performs a half step (Δt / 2) instead of a full step.
+    # Masses do not change during the simulation.
+    # Calculate their inverse only once.
+    if not hasattr(ps, "inverse_mass"):
+        ps.inverse_mass = 1.0 / ps.mass
 
-    Returns:
-        None. Updates ps.velocity in-place.
-    """
-    # set time step, depending on whether a half- or full step is performed
-    if half_step == True:
-        dt = 0.5 * sim.dt
-    else:
-        dt = sim.dt
-        
-    # (1/ps.mass)[:, np.newaxis] = explicit reshaping to avoid
-    # broadcasting issues when multiplying (N,) with (N,3) elementwise
-    # now it is explicit: (N,1) * (N,3)
-    ps.velocity = ps.velocity + (1/ps.mass)[:, np.newaxis]* dt * ps.force 
-    
-    return None    
+    ps.velocity += (
+        ps.inverse_mass[:, np.newaxis]
+        * dt
+        * ps.force
+    )
+
+    return None
 
 def O_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
     """
@@ -502,72 +642,55 @@ def O_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
     
     return None    
 
-def simulate_NVE_step(ps: ParticleSystem, sim: SimulationParameters):
-    """
-    Performs a single time step of molecular dynamics in the NVE ensemble
-    using the velocity Verlet integrator in BAB form (half-step B, full-step A, half-step B).
-
-    The steps are:
-    1. Half-step velocity update (B-step)
-    2. Full-step position update (A-step)
-    3. Force recalculation based on new positions
-    4. Second half-step velocity update (B-step)
-    5. Apply periodic boundary conditions
-
-    This corresponds to a time-symmetric, second-order accurate integrator for Newtonian dynamics.
-
-    Parameters:
-        - ps (ParticleSystem): The particle system containing positions, velocities, and forces.
-        - sim (SimulationParameters): Simulation parameters including time step.
-
-    Returns:
-        None. Updates ps.position, ps.velocity, and ps.force in-place.
-    """
-    B_step(ps, sim, half_step=True)   # update velocity by a half-step
-    A_step(ps, sim, half_step=False)  # update position by a full time step
-    calculate_force(ps, sim)          # udpate force  
-    B_step(ps, sim, half_step=True)   # update velocity by a second half-step
+def simulate_NVE_step(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int):
+    B_step(ps, sim, half_step=True)
+    A_step(ps, sim, half_step=False)
 
     apply_periodic_boundary(ps, sim)
-        
-    return None      
 
-def simulate_NVT_step(ps: ParticleSystem, sim: SimulationParameters):
-    """
-    Performs a single time step of molecular dynamics in the NVT ensemble
-    using the BAOAB Langevin integrator.
+    update_neighbour_list(
+        ps,
+        sim,
+        step,
+        n_update
+    )
 
-    The steps are:
-    1. Half-step velocity update from force (B)
-    2. Half-step position update (A)
-    3. Full-step velocity update via Langevin thermostat (O)
-    4. Second half-step position update (A)
-    5. Force recalculation
-    6. Second half-step velocity update from force (B)
-    7. Apply periodic boundary conditions
+    calculate_force(
+        ps,
+        sim
+    )
 
-    Parameters:
-        ps (ParticleSystem): Particle data including velocity, position, mass, etc.
-        sim (SimulationParameters): Simulation control parameters.
+    B_step(ps, sim, half_step=True)
 
-    Returns:
-        None
-    """
-    
+    return None
+
+
+def simulate_NVT_step(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int):
     if sim.tau_thermostat is None:
-        raise ValueError("Thermostat coupling time (tau_thermostat) is not set. Cannot run NVT simulation.")
-    
-    B_step(ps, sim, half_step=True)   # update velocity by a half-step
-    A_step(ps, sim, half_step=True)  # update position by a half-step
-    # thermostat
-    O_step(ps, sim, half_step=False)  # Full-step velocity update using the Langevin thermostat (friction + noise)
-    A_step(ps, sim, half_step=True)  # update position by a half-step
-    calculate_force(ps, sim)          # udpate force  
-    B_step(ps, sim, half_step=True)   # update velocity by a second half-step
+        raise ValueError("Thermostat coupling time is not set")
+
+    B_step(ps, sim, half_step=True)
+    A_step(ps, sim, half_step=True)
+    O_step(ps, sim, half_step=False)
+    A_step(ps, sim, half_step=True)
 
     apply_periodic_boundary(ps, sim)
-        
-    return None 
+
+    update_neighbour_list(
+        ps,
+        sim,
+        step,
+        n_update
+    )
+
+    calculate_force(
+        ps,
+        sim
+    )
+
+    B_step(ps, sim, half_step=True)
+
+    return None
 
 def apply_periodic_boundary(ps: ParticleSystem, sim: SimulationParameters): 
     """
@@ -613,38 +736,65 @@ def write_xyz_trajectory(filename, trajectory, atom_symbol="Ar"):
 #--------------------------------------
 # Statistics
 #--------------------------------------
-def cutoff_pair_statistics(ps: ParticleSystem, sim: SimulationParameters):
-    """
-    Counts how many unique particle pairs are inside the cutoff radius.
+def cutoff_pair_statistics(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+):
+    """Count total pairs and current pairs inside the cutoff."""
 
-    Returns:
-        n_pairs_total (int): total number of unique pairs i < j
-        n_pairs_cutoff (int): number of pairs with r <= r_cut
-        percent_pairs_cutoff (float): percentage of pairs inside the cutoff
-    """
     if sim.r_cut is None:
-        raise ValueError("r_cut must be set to calculate cutoff pair statistics.")
+        raise ValueError(
+            "r_cut must be set to calculate cutoff pair statistics."
+        )
 
-    n_particles = ps.n
-    L = sim.box_length
+    if not hasattr(ps, "neighbour_pairs"):
+        raise ValueError(
+            "neighbour list was not created"
+        )
 
-    # Compute pairwise distance vectors
-    rij_matrix = ps.position[:, np.newaxis, :] - ps.position[np.newaxis, :, :]
+    n_pairs_total = (
+        ps.n * (ps.n - 1) // 2
+    )
 
-    # Apply periodic boundary conditions
-    rij_matrix -= L * np.rint(rij_matrix / L)
+    if ps.neighbour_pairs.shape[0] == 0:
+        return n_pairs_total, 0, 0.0
 
-    # Compute pairwise distances
-    r_matrix = np.linalg.norm(rij_matrix, axis=-1)
+    i_pairs = ps.neighbour_pairs[:, 0]
+    j_pairs = ps.neighbour_pairs[:, 1]
 
-    # Use only unique pairs i < j
-    i_upper = np.triu_indices(n_particles, k=1)
-    r = r_matrix[i_upper]
+    rij = (
+        ps.position[i_pairs]
+        - ps.position[j_pairs]
+    )
 
-    # Count pairs inside cutoff
-    n_pairs_total = r.size
-    n_pairs_cutoff = np.sum(r <= sim.r_cut)
-    percent_pairs_cutoff = 100 * n_pairs_cutoff / n_pairs_total
+    rij -= sim.box_length * np.rint(
+        rij / sim.box_length
+    )
 
-    return n_pairs_total, n_pairs_cutoff, percent_pairs_cutoff
- 
+    r_squared = np.einsum(
+        "ij,ij->i",
+        rij,
+        rij
+    )
+
+    n_pairs_cutoff = int(
+        np.count_nonzero(
+            r_squared
+            <= sim.r_cut * sim.r_cut
+        )
+    )
+
+    if n_pairs_total > 0:
+        percent_pairs_cutoff = (
+            100.0
+            * n_pairs_cutoff
+            / n_pairs_total
+        )
+    else:
+        percent_pairs_cutoff = 0.0
+
+    return (
+        n_pairs_total,
+        n_pairs_cutoff,
+        percent_pairs_cutoffx
+    )

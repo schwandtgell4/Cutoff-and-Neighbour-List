@@ -25,23 +25,23 @@ import matplotlib.pyplot as plt
 import time
 from datetime import datetime
 
-from LJ_gas import(
+from LJ_gas import (
     ParticleSystem,
     SimulationParameters,
     simulate_NVE_step,
     simulate_NVT_step,
     initialize_positions,
     initialize_velocities,
-    update_neighbour_list,
     calculate_force,
+    update_neighbour_list,
     density,
     write_xyz_trajectory,
     potential_energy,
     kinetic_energy,
     instantaneous_temperature,
     ideal_gas_pressure,
-    cutoff_pair_statistics # statistics
-    )
+    cutoff_pair_statistics
+)
 
 #----------------------------------------------------------------
 #   F U N C T I O N S
@@ -91,25 +91,26 @@ r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at 
 
 # output
 file_name_base = "my_simulation"  # file name for all output files
+simulation_only = False
 
 #----------------------------------------------------------------
 #   P R O G R A M
 #----------------------------------------------------------------
-# start the timer
-tic()
+
 
 #
 # initialize simulation parameters
 #
-sim = SimulationParameters(dt = dt, 
-                           n_steps = n_steps, 
-                           temperature = temperature, 
-                           box_length = box_length, 
-                           tau_thermostat = tau_thermostat,
-                           rij_min=rij_min,
-                           r_cut = r_cut,
-                           use_cutoff = use_cutoff
-                           )
+sim = SimulationParameters(
+    dt=dt,
+    n_steps=n_steps,
+    temperature=temperature,
+    box_length=box_length,
+    tau_thermostat=tau_thermostat,
+    rij_min=rij_min,
+    r_cut=r_cut,
+    use_cutoff=use_cutoff
+)
 
 #
 # initialize ParticleSystem 
@@ -117,8 +118,9 @@ sim = SimulationParameters(dt = dt,
 ps = ParticleSystem(n_particles)
 
 # fill in the parameters for argon
-for i in range(n_particles):
-    ps.set_parameters(i, mass=mass_argon, sigma=sigma_argon, epsilon=epsilon_argon)
+ps.mass[:] = mass_argon
+ps.sigma[:] = sigma_argon
+ps.epsilon[:] = epsilon_argon
 
 # set initial positions
 initialize_positions(ps, sim.box_length)
@@ -146,17 +148,41 @@ E_kin_init = kinetic_energy(ps)
 T_init = instantaneous_temperature(ps)
 P_init = ideal_gas_pressure(ps, sim)
 
+# P/T is constant because N and V remain constant.
+pressure_per_kelvin = (
+    P_init / T_init
+    if T_init != 0.0
+    else 0.0
+)
 
-# initialize position trajectory
-position_trajectory = np.zeros((sim.n_steps+1, n_particles, 3))
-position_trajectory[0,:,:] = ps.position # initial position
+if simulation_only:
+    position_trajectory = None
+    energy_trajectory = None
 
-# initialize energy trajectory
-energy_trajectory = np.zeros((sim.n_steps+1, 4))
-energy_trajectory[0,0] = potential_energy( ps, sim)       # potential energy
-energy_trajectory[0,1] = kinetic_energy(ps)               # kinetic energy
-energy_trajectory[0,2] = instantaneous_temperature(ps)    # instantaneous pressure
-energy_trajectory[0,3] = ideal_gas_pressure(ps, sim)      # ideal gas pressure
+else:
+    # initialize position trajectory
+    position_trajectory = np.zeros(
+        (
+            sim.n_steps + 1,
+            n_particles,
+            3
+        )
+    )
+
+    position_trajectory[0] = ps.position
+
+    # initialize energy trajectory
+    energy_trajectory = np.zeros(
+        (
+            sim.n_steps + 1,
+            4
+        )
+    )
+
+    energy_trajectory[0, 0] = E_pot_init
+    energy_trajectory[0, 1] = E_kin_init
+    energy_trajectory[0, 2] = T_init
+    energy_trajectory[0, 3] = P_init
 
 
 #--------------------------------------------------
@@ -164,29 +190,95 @@ energy_trajectory[0,3] = ideal_gas_pressure(ps, sim)      # ideal gas pressure
 #--------------------------------------------------
 print("Starting MD simulation...", flush=True)
 
+# Measure only the MD simulation loop.
+tic()
+
 for i in range(sim.n_steps):
-    if NVT == True:
-        simulate_NVT_step(ps, sim)
-    else: 
-        simulate_NVE_step(ps, sim)
+    if NVT:
+        simulate_NVT_step(
+            ps,
+            sim,
+            i + 1,
+            n_update
+        )
+    else:
+        simulate_NVE_step(
+            ps,
+            sim,
+            i + 1,
+            n_update
+        )
 
-        update_neighbour_list(ps, sim, step=i + 1, n_update=n_update) #update the list
+    # Only calculate and store output quantities when requested.
+    if not simulation_only:
+        position_trajectory[i + 1] = ps.position
 
-    # store updated positions
-    position_trajectory[i+1,:,:] = ps.position
+        # Calculate kinetic energy only once.
+        e_kin = kinetic_energy(ps)
 
-    # store updated energies, temperature and pressure
-    energy_trajectory[i+1,0] = potential_energy(ps, sim)
-    energy_trajectory[i+1,1] = kinetic_energy(ps)
-    energy_trajectory[i+1,2] = instantaneous_temperature(ps)
-    energy_trajectory[i+1,3] = ideal_gas_pressure(ps, sim)
+        current_temperature = (
+            2.0
+            * e_kin
+            * 1e3
+            / (3.0 * ps.n * R)
+        )
 
-    # print progress every 10% of the simulation
-    if (i + 1) % max(1, sim.n_steps // 10) == 0:
-        percent = 100 * (i + 1) / sim.n_steps
-        print(f"Step {i+1}/{sim.n_steps} finished ({percent:.0f}%)", flush=True)
+        energy_trajectory[i + 1, 0] = (
+            potential_energy(ps, sim)
+        )
 
-print("MD simulation finished. Writing output files...", flush=True)
+        energy_trajectory[i + 1, 1] = e_kin
+
+        energy_trajectory[i + 1, 2] = (
+            current_temperature
+        )
+
+        energy_trajectory[i + 1, 3] = (
+            pressure_per_kelvin
+            * current_temperature
+        )
+
+    # Print progress every 10 percent.
+    if (i + 1) % max(
+        1,
+        sim.n_steps // 10
+    ) == 0:
+        percent = (
+            100
+            * (i + 1)
+            / sim.n_steps
+        )
+
+        print(
+            f"Step {i + 1}/{sim.n_steps} finished "
+            f"({percent:.0f}%)",
+            flush=True
+        )
+
+elapsed_time = toc()
+
+print("MD simulation finished.", flush=True)
+
+print(
+    f"MD loop time: "
+    f"{elapsed_time:.6f} s"
+)
+
+print(
+    f"Time per MD step: "
+    f"{elapsed_time / sim.n_steps:.6e} s"
+)
+
+print(
+    f"Neighbour-list rebuilds: "
+    f"{ps.neighbour_rebuilds}"
+)
+
+# Stop here when only the simulation is required.
+if simulation_only:
+    raise SystemExit
+
+print("Writing output files...", flush=True)
 
 
 #--------------------------------------
@@ -269,7 +361,7 @@ plt.show()
 #--------------------------------------
 # O U T P U T 
 #--------------------------------------
-elapsed_time = toc()   # stop the timer
+    
 
 
 # calculate cutoff pair statistics for the final configuration
