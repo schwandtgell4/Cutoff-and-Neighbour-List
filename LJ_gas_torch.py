@@ -217,26 +217,56 @@ def initialize_velocities(ps: ParticleSystem, temperature: float):
 
 
 #--------------------------------------
-# nachbarliste def
+# nachbarliste def #updated, so dass auch aktualisiert wenn ein teilchen mehr als die halbe skin bewegt hat
 #--------------------------------------
 
 def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int = 10):
     if n_update < 1:
         raise ValueError("n_update must be at least 1")
 
+    if not sim.use_cutoff or sim.r_cut is None:
+        raise ValueError("neighbour list requires use_cutoff=True and r_cut")
+
+    rebuild = False
+
     if not hasattr(ps, "neighbour_pairs"):
-        rcut = sim.r_cut
-        skin = 0.3 * ps.sigma[0]
-        ps.rcut = rcut
-        ps.neighbour_skin = skin
+        ps.rcut = sim.r_cut
+        ps.neighbour_skin = 0.3 * ps.sigma[0]
+
         ps.neighbour_pairs = torch.empty(
             (0, 2),
             dtype=torch.long,
             device=ps.position.device
         )
-        ps.neighbour_list_step = -n_update
 
-    if step == 0 or step - ps.neighbour_list_step >= n_update:
+        ps.neighbour_list_step = -n_update
+        ps.neighbour_reference_position = ps.position.clone()
+        rebuild = True
+
+    else:
+        displacement = ps.position - ps.neighbour_reference_position
+
+        displacement = displacement - sim.box_length * torch.round(
+            displacement / sim.box_length
+        )
+
+        displacement = torch.sqrt(
+            torch.sum(displacement**2, dim=1)
+        )
+
+        max_displacement = torch.max(displacement).item()
+        half_skin = 0.5 * ps.neighbour_skin.item()
+
+        if step - ps.neighbour_list_step >= n_update:
+            rebuild = True
+
+        if max_displacement > half_skin:
+            rebuild = True
+
+    if step == 0:
+        rebuild = True
+
+    if rebuild:
         i, j = torch.triu_indices(
             ps.n,
             ps.n,
@@ -245,46 +275,52 @@ def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: i
         )
 
         rij = ps.position[i] - ps.position[j]
-        rij -= sim.box_length * torch.round(rij / sim.box_length)
 
-        r2 = torch.einsum("ij,ij->i", rij, rij)
+        rij = rij - sim.box_length * torch.round(
+            rij / sim.box_length
+        )
 
-        mask = r2 < (ps.rcut + ps.neighbour_skin)**2
+        r2 = torch.sum(rij**2, dim=1)
+
+        list_cutoff = ps.rcut + ps.neighbour_skin
+        mask = r2 <= list_cutoff**2
 
         ps.neighbour_pairs = torch.column_stack(
             (i[mask], j[mask])
         )
 
         ps.neighbour_list_step = step
+        ps.neighbour_reference_position = ps.position.clone()
 
     return ps.neighbour_pairs
 
 
 #----------------------------------------------------------------
-#   E N E R G I E S / P R O P E R T I E S
+#   E N E R G I E S / P R O P E R T I E S #Neigbbouhr list verwenden, rest bleibt als backup da
 #----------------------------------------------------------------
 def potential_energy(ps: ParticleSystem, sim: SimulationParameters) -> float:
-    """
-    Compute total Lennard-Jones potential energy in kJ/mol.
+    sigma = ps.sigma[0]
+    epsilon = ps.epsilon[0]
 
-    Uses torch operations when ps.position is a torch tensor; otherwise uses NumPy.
-    Returns a Python float so it can be stored in NumPy output arrays.
-    """
     if torch.is_tensor(ps.position):
-        n_particles = ps.n
-        sigma = ps.sigma[0]
-        epsilon = ps.epsilon[0]
-        L = sim.box_length
-        device = ps.position.device
+        if not hasattr(ps, "neighbour_pairs"):
+            raise ValueError("neighbour list was not created")
 
-        rij_matrix = ps.position[:, None, :] - ps.position[None, :, :]
-        rij_matrix = rij_matrix - L * torch.round(rij_matrix / L)
-        r_matrix = torch.linalg.norm(rij_matrix, dim=-1)
+        i_pairs = ps.neighbour_pairs[:, 0]
+        j_pairs = ps.neighbour_pairs[:, 1]
 
-        i_pairs, j_pairs = torch.triu_indices(
-            n_particles, n_particles, offset=1, device=device
+        if i_pairs.numel() == 0:
+            return 0.0
+
+        rij = ps.position[i_pairs] - ps.position[j_pairs]
+
+        rij = rij - sim.box_length * torch.round(
+            rij / sim.box_length
         )
-        r = r_matrix[i_pairs, j_pairs]
+
+        r = torch.sqrt(
+            torch.sum(rij**2, dim=1)
+        )
 
         if sim.use_cutoff and sim.r_cut is not None:
             r = r[r <= sim.r_cut]
@@ -293,22 +329,34 @@ def potential_energy(ps: ParticleSystem, sim: SimulationParameters) -> float:
             return 0.0
 
         r = torch.clamp(r, min=sim.rij_min)
+
         sr6 = (sigma / r) ** 6
-        lj_pairwise = 4 * epsilon * (sr6**2 - sr6)
-        return tensor_to_float(torch.sum(lj_pairwise))
+        pair_energy = 4 * epsilon * (sr6**2 - sr6)
 
-    # NumPy fallback before conversion to torch
-    n_particles = ps.n
-    sigma = ps.sigma[0]
-    epsilon = ps.epsilon[0]
-    L = sim.box_length
+        return tensor_to_float(
+            torch.sum(pair_energy)
+        )
 
-    rij_matrix = ps.position[:, np.newaxis, :] - ps.position[np.newaxis, :, :]
-    rij_matrix -= L * np.rint(rij_matrix / L)
-    r_matrix = np.linalg.norm(rij_matrix, axis=-1)
+    rij_matrix = (
+        ps.position[:, np.newaxis, :]
+        - ps.position[np.newaxis, :, :]
+    )
 
-    i_upper = np.triu_indices(n_particles, k=1)
-    r = r_matrix[i_upper]
+    rij_matrix = rij_matrix - sim.box_length * np.rint(
+        rij_matrix / sim.box_length
+    )
+
+    r_matrix = np.linalg.norm(
+        rij_matrix,
+        axis=-1
+    )
+
+    i_pairs, j_pairs = np.triu_indices(
+        ps.n,
+        k=1
+    )
+
+    r = r_matrix[i_pairs, j_pairs]
 
     if sim.use_cutoff and sim.r_cut is not None:
         r = r[r <= sim.r_cut]
@@ -316,10 +364,18 @@ def potential_energy(ps: ParticleSystem, sim: SimulationParameters) -> float:
     if r.size == 0:
         return 0.0
 
-    r = np.clip(r, sim.rij_min, None)
+    r = np.clip(
+        r,
+        sim.rij_min,
+        None
+    )
+
     sr6 = (sigma / r) ** 6
-    lj_pairwise = 4 * epsilon * (sr6**2 - sr6)
-    return float(np.sum(lj_pairwise))
+    pair_energy = 4 * epsilon * (sr6**2 - sr6)
+
+    return float(
+        np.sum(pair_energy)
+    )
 
 
 def kinetic_energy(ps: ParticleSystem) -> float:
@@ -371,72 +427,96 @@ def calculate_force(ps: ParticleSystem, sim: SimulationParameters):
     return calculate_force_torch(ps, sim)
 
 
+#kein nutzen der NXN matrix mehr als ganzes, nur noch neighbour list
 def calculate_force_torch(ps: ParticleSystem, sim: SimulationParameters):
-    """
-    GPU-compatible Lennard-Jones force calculation using PyTorch.
-
-    The expensive part is the pairwise force calculation. The force accumulation
-    is done with index_add_ instead of a Python loop over pairs.
-    """
     if not torch.is_tensor(ps.position):
-        raise TypeError("calculate_force_torch requires ps.position to be a torch tensor. Call move_particle_system_to_torch(ps) first.")
+        raise TypeError("calculate_force_torch requires torch tensors")
 
-    n_particles = ps.n
+    if not hasattr(ps, "neighbour_pairs"):
+        raise ValueError("neighbour list was not created")
+
     sigma = ps.sigma[0]
     epsilon = ps.epsilon[0]
-    L = sim.box_length
-    device = ps.position.device
 
-    # Pairwise distance vectors, shape (N, N, 3)
-    rij_matrix = ps.position[:, None, :] - ps.position[None, :, :]
+    i_pairs = ps.neighbour_pairs[:, 0]
+    j_pairs = ps.neighbour_pairs[:, 1]
 
-    # Minimum-image convention for periodic boundary conditions
-    rij_matrix = rij_matrix - L * torch.round(rij_matrix / L)
+    if i_pairs.numel() == 0:
+        ps.force = torch.zeros_like(ps.position)
+        return None
 
-    # Pairwise distances, shape (N, N)
-    r_matrix = torch.linalg.norm(rij_matrix, dim=-1)
+    rij = ps.position[i_pairs] - ps.position[j_pairs]
 
-    # Unique pairs i < j
-    i_pairs, j_pairs = torch.triu_indices(
-        n_particles, n_particles, offset=1, device=device
+    rij = rij - sim.box_length * torch.round(
+        rij / sim.box_length
     )
 
-    rij = rij_matrix[i_pairs, j_pairs]
-    r = r_matrix[i_pairs, j_pairs]
+    r = torch.sqrt(
+        torch.sum(rij**2, dim=1)
+    )
 
-    # Apply upper cutoff.
     if sim.use_cutoff and sim.r_cut is not None:
-        cutoff_mask = r <= sim.r_cut
-        rij = rij[cutoff_mask]
-        r = r[cutoff_mask]
-        i_pairs = i_pairs[cutoff_mask]
-        j_pairs = j_pairs[cutoff_mask]
+        mask = r <= sim.r_cut
 
-    # If no pair is inside the cutoff, all LJ forces are zero.
+        i_pairs = i_pairs[mask]
+        j_pairs = j_pairs[mask]
+        rij = rij[mask]
+        r = r[mask]
+
     if r.numel() == 0:
         ps.force = torch.zeros_like(ps.position)
         return None
 
-    # Lower cutoff for numerical stability.
-    r = torch.clamp(r, min=sim.rij_min)
+    r = torch.clamp(
+        r,
+        min=sim.rij_min
+    )
 
-    # Normalize rij to unit vectors and rescale to match clipped r.
-    rij_norm = torch.linalg.norm(rij, dim=1).clamp_min(sim.rij_min)
-    rij = (rij / rij_norm[:, None]) * r[:, None]
+    rij_length = torch.sqrt(
+        torch.sum(rij**2, dim=1)
+    )
 
-    # Lennard-Jones force.
+    rij_length = torch.clamp(
+        rij_length,
+        min=sim.rij_min
+    )
+
+    rij = rij / rij_length[:, None] * r[:, None]
+
     sr6 = (sigma / r) ** 6
-    dV_dr = 24 * epsilon / r * (-2 * sr6**2 + sr6)
-    f_ij = (dV_dr[:, None] / r[:, None]) * rij
 
-    # Accumulate forces on particles. This replaces the slow Python loop.
-    force = torch.zeros_like(ps.position)
-    force.index_add_(0, i_pairs, -f_ij)
-    force.index_add_(0, j_pairs,  f_ij)
+    dV_dr = (
+        24
+        * epsilon
+        / r
+        * (-2 * sr6**2 + sr6)
+    )
+
+    pair_force = (
+        dV_dr[:, None]
+        / r[:, None]
+        * rij
+    )
+
+    force = torch.zeros_like(
+        ps.position
+    )
+
+    force.index_add_(
+        0,
+        i_pairs,
+        -pair_force
+    )
+
+    force.index_add_(
+        0,
+        j_pairs,
+        pair_force
+    )
 
     ps.force = force
-    return None
 
+    return None
 
 #----------------------------------------------------------------
 #   M D   I N T E G R A T O R S
@@ -478,30 +558,57 @@ def O_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
     return None
 
 
-def simulate_NVE_step(ps: ParticleSystem, sim: SimulationParameters):
-    """One NVE Velocity-Verlet step."""
+
+#aktualiesierung der neighbour list in den sims selbst  
+def simulate_NVE_step(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int):
     B_step(ps, sim, half_step=True)
     A_step(ps, sim, half_step=False)
-    calculate_force_torch(ps, sim)
-    B_step(ps, sim, half_step=True)
+
     apply_periodic_boundary(ps, sim)
+
+    update_neighbour_list(
+        ps,
+        sim,
+        step,
+        n_update
+    )
+
+    calculate_force_torch(
+        ps,
+        sim
+    )
+
+    B_step(ps, sim, half_step=True)
+
     return None
 
 
-def simulate_NVT_step(ps: ParticleSystem, sim: SimulationParameters):
-    """One NVT BAOAB Langevin step."""
+def simulate_NVT_step(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int):
     if sim.tau_thermostat is None:
-        raise ValueError("Thermostat coupling time (tau_thermostat) is not set. Cannot run NVT simulation.")
+        raise ValueError("Thermostat coupling time is not set")
 
     B_step(ps, sim, half_step=True)
     A_step(ps, sim, half_step=True)
     O_step(ps, sim, half_step=False)
     A_step(ps, sim, half_step=True)
-    calculate_force_torch(ps, sim)
-    B_step(ps, sim, half_step=True)
-    apply_periodic_boundary(ps, sim)
-    return None
 
+    apply_periodic_boundary(ps, sim)
+
+    update_neighbour_list(
+        ps,
+        sim,
+        step,
+        n_update
+    )
+
+    calculate_force_torch(
+        ps,
+        sim
+    )
+
+    B_step(ps, sim, half_step=True)
+
+    return None
 
 def apply_periodic_boundary(ps: ParticleSystem, sim: SimulationParameters):
     """Wrap positions back into the simulation box."""

@@ -171,11 +171,19 @@ md_start_time = time.time()
 
 for i in range(sim.n_steps):
     if NVT == True:
-        simulate_NVT_step(ps, sim)
-    else: 
-        simulate_NVE_step(ps, sim)
-
-    update_neighbour_list(ps, sim, step=i + 1, n_update=n_update)
+        simulate_NVT_step(
+            ps,
+            sim,
+            i + 1,
+            n_update
+        )
+    else:
+        simulate_NVE_step(
+            ps,
+            sim,
+            i + 1,
+            n_update
+        )
 
     # store updated positions
     position_trajectory[i+1,:,:] = tensor_to_numpy(ps.position)
