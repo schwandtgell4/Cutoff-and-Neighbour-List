@@ -60,6 +60,21 @@ def toc():
 
     return elapsed_time
 
+def kinetic_energy_tensor(ps):
+    """
+    Calculate kinetic energy as a scalar tensor
+    without CPU transfer.
+    """
+    v_squared = (
+        ps.velocity
+        * ps.velocity
+    ).sum(dim=1)
+
+    return 0.5 * (
+        ps.mass
+        * v_squared
+    ).sum()
+
 
 def save_plot(x, y, filename, xlabel, ylabel, y_margin):
     """Save one trajectory plot without blocking the program with plt.show()."""
@@ -99,11 +114,18 @@ r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at 
 # output
 file_name_base = "my_simulation_torch"
 
+# Save every MD step with 1.
+# Use 10 to save only every tenth step.
+sample_every = 1
+
+# Set False to skip the large XYZ position trajectory.
+save_position_trajectory = True
+
 
 #----------------------------------------------------------------
 #   P R O G R A M
 #----------------------------------------------------------------
-tic()
+total_start_time = time.perf_counter()
 
 sim = SimulationParameters(dt = dt, 
                            n_steps = n_steps, 
@@ -118,10 +140,10 @@ sim = SimulationParameters(dt = dt,
 # initialize ParticleSystem
 ps = ParticleSystem(n_particles)
 
-# fill in the parameters for argon
-for i in range(n_particles):
-    ps.set_parameters(i, mass=mass_argon, sigma=sigma_argon, epsilon=epsilon_argon)
-
+# Vectorized initialization.
+ps.mass[:] = mass_argon
+ps.sigma[:] = sigma_argon
+ps.epsilon[:] = epsilon_argon
 # set initial positions
 initialize_positions(ps, sim.box_length)
 initialize_velocities(ps, sim.temperature)
@@ -143,90 +165,297 @@ n_total_init, n_cut_init, percent_cut_init = cutoff_pair_statistics(ps, sim)
 print(f"r_cut = {sim.r_cut:.3f} nm")
 print(f"Initial pairs inside cutoff: {n_cut_init}/{n_total_init} ({percent_cut_init:.4f}%)")
 
-# calculate initial values of variable properties
-E_pot_init = potential_energy(ps, sim)
-E_kin_init = kinetic_energy(ps)
-T_init = instantaneous_temperature(ps)
-P_init = ideal_gas_pressure(ps, sim)
+# Initial values are calculated once outside
+# the timed MD loop.
+E_pot_init = potential_energy(
+    ps,
+    sim
+)
 
-# initialize position trajectory on CPU because write_xyz_trajectory expects NumPy data
-position_trajectory = np.zeros((sim.n_steps + 1, n_particles, 3))
-position_trajectory[0, :, :] = tensor_to_numpy(ps.position)
+E_kin_init = kinetic_energy(
+    ps
+)
 
-# initialize energy trajectory on CPU
-energy_trajectory = np.zeros((sim.n_steps + 1, 4))
-energy_trajectory[0, 0] = E_pot_init
-energy_trajectory[0, 1] = E_kin_init
-energy_trajectory[0, 2] = T_init
-energy_trajectory[0, 3] = P_init
+T_init = (
+    2.0
+    * E_kin_init
+    * 1e3
+    / (
+        3.0
+        * ps.n
+        * R
+    )
+)
+
+P_init = (
+    (
+        ps.n
+        / 6.02214076e23
+    )
+    * R
+    * T_init
+    / (
+        sim.box_length**3
+        * 1e-27
+    )
+)
+
+if sample_every < 1:
+    raise ValueError(
+        "sample_every must be at least 1"
+    )
+
+saved_steps = list(
+    range(
+        0,
+        sim.n_steps + 1,
+        sample_every
+    )
+)
+
+if saved_steps[-1] != sim.n_steps:
+    saved_steps.append(
+        sim.n_steps
+    )
+
+step_to_frame = {
+    step: frame
+    for frame, step
+    in enumerate(saved_steps)
+}
+
+n_frames = len(
+    saved_steps
+)
+
+# Keep the trajectory on the selected device
+# during the MD loop.
+if save_position_trajectory:
+    position_trajectory_device = (
+        ps.position.new_empty(
+            (
+                n_frames,
+                ps.n,
+                3
+            )
+        )
+    )
+
+    position_trajectory_device[0].copy_(
+        ps.position
+    )
+else:
+    position_trajectory_device = None
+
+energy_trajectory_device = (
+    ps.position.new_empty(
+        (
+            n_frames,
+            4
+        )
+    )
+)
+
+energy_trajectory_device[
+    0,
+    0
+] = ps.current_potential_energy
+
+energy_trajectory_device[
+    0,
+    1
+] = E_kin_init
+
+energy_trajectory_device[
+    0,
+    2
+] = T_init
+
+energy_trajectory_device[
+    0,
+    3
+] = P_init
 
 
 #--------------------------------------------------
 #  The actual MD simulation
 #--------------------------------------------------
-print("Starting MD simulation...", flush=True)
+print(
+    "Starting MD simulation...",
+    flush=True
+)
 
+# CUDA and MPS operations are asynchronous.
 synchronize_device(device)
-md_start_time = time.time()
 
-for i in range(sim.n_steps):
-    if NVT == True:
+md_start_time = (
+    time.perf_counter()
+)
+
+for step in range(
+    1,
+    sim.n_steps + 1
+):
+    if NVT:
         simulate_NVT_step(
             ps,
             sim,
-            i + 1,
+            step,
             n_update
         )
     else:
         simulate_NVE_step(
             ps,
             sim,
-            i + 1,
+            step,
             n_update
         )
 
-    # store updated positions
-    position_trajectory[i+1,:,:] = tensor_to_numpy(ps.position)
+    frame = step_to_frame.get(
+        step
+    )
 
-    # store updated energies, temperature and pressure
-    energy_trajectory[i+1,0] = potential_energy(ps, sim)
-    energy_trajectory[i+1,1] = kinetic_energy(ps)
-    energy_trajectory[i+1,2] = instantaneous_temperature(ps)
-    energy_trajectory[i+1,3] = ideal_gas_pressure(ps, sim)
+    if frame is not None:
+        if save_position_trajectory:
+            position_trajectory_device[
+                frame
+            ].copy_(
+                ps.position
+            )
 
-    # print progress every 10% of the simulation
-    if (i + 1) % max(1, sim.n_steps // 10) == 0:
-        percent = 100 * (i + 1) / sim.n_steps
+        # Calculate all values on the device.
+        # No .item() or NumPy conversion here.
+        e_kin_device = (
+            kinetic_energy_tensor(
+                ps
+            )
+        )
+
+        temperature_device = (
+            2.0
+            * e_kin_device
+            * 1e3
+            / (
+                3.0
+                * ps.n
+                * R
+            )
+        )
+
+        pressure_device = (
+            (
+                ps.n
+                / 6.02214076e23
+            )
+            * R
+            * temperature_device
+            / (
+                sim.box_length**3
+                * 1e-27
+            )
+        )
+
+        energy_trajectory_device[
+            frame,
+            0
+        ] = ps.current_potential_energy
+
+        energy_trajectory_device[
+            frame,
+            1
+        ] = e_kin_device
+
+        energy_trajectory_device[
+            frame,
+            2
+        ] = temperature_device
+
+        energy_trajectory_device[
+            frame,
+            3
+        ] = pressure_device
+
+    if (
+        step
+        % max(
+            1,
+            sim.n_steps // 10
+        )
+        == 0
+    ):
+        percent = (
+            100
+            * step
+            / sim.n_steps
+        )
+
         print(
-            f"Step {i+1}/{sim.n_steps} finished "
-            f"({percent:.0f}%)",
+            f"Step {step}/{sim.n_steps} "
+            f"finished ({percent:.0f}%)",
             flush=True
         )
 
-
+# Wait for all queued GPU kernels.
 synchronize_device(device)
-md_elapsed_time = time.time() - md_start_time
-print("MD simulation finished. Writing output files...", flush=True)
+
+md_elapsed_time = (
+    time.perf_counter()
+    - md_start_time
+)
+
+print(
+    "MD simulation finished. "
+    "Transferring and writing output...",
+    flush=True
+)
+
+# Transfer once after the simulation instead
+# of once per MD step.
+if save_position_trajectory:
+    position_trajectory = (
+        tensor_to_numpy(
+            position_trajectory_device
+        )
+    )
+else:
+    position_trajectory = None
+
+energy_trajectory = tensor_to_numpy(
+    energy_trajectory_device
+)
 
 
 #--------------------------------------
 # W R I T E    T R A J E C T O R I E S
 #--------------------------------------
-write_xyz_trajectory(file_name_base + "_pos.xyz", position_trajectory, atom_symbol="Ar")
-np.save(file_name_base + "_ene.npy", energy_trajectory)
+if save_position_trajectory:
+    write_xyz_trajectory(
+        file_name_base + "_pos.xyz",
+        position_trajectory,
+        atom_symbol="Ar"
+    )
+
+np.save(
+    file_name_base + "_ene.npy",
+    energy_trajectory
+)
+
 np.savetxt(
     file_name_base + "_ene.dat",
     energy_trajectory,
     fmt="%.6e",
     header="#E_pot  E_kin  T  P",
-    comments="",
+    comments=""
 )
 
 
 #----------------------------------------------------
 # P L O T   E N E R G Y   T R A J E C T O R I E S
 #----------------------------------------------------
-time_ps = np.arange(sim.n_steps + 1) * sim.dt
+time_ps = (
+    np.asarray(saved_steps)
+    * sim.dt
+)
 
 save_plot(time_ps, energy_trajectory[:, 0], file_name_base + "_Epot.png", "time [ps]", "E_pot [kJ/mol]", 1)
 save_plot(time_ps, energy_trajectory[:, 1], file_name_base + "_Ekin.png", "time [ps]", "E_kin [kJ/mol]", 100)
@@ -237,10 +466,20 @@ save_plot(time_ps, energy_trajectory[:, 3], file_name_base + "_P.png", "time [ps
 #--------------------------------------
 # O U T P U T
 #--------------------------------------
-elapsed_time = toc()
 
-# calculate cutoff pair statistics for the final configuration
-n_total_final, n_cut_final, percent_cut_final = cutoff_pair_statistics(ps, sim)
+
+# Calculate final pair statistics.
+n_total_final, n_cut_final, percent_cut_final = (
+    cutoff_pair_statistics(
+        ps,
+        sim
+    )
+)
+
+total_elapsed_time = (
+    time.perf_counter()
+    - total_start_time
+)
 
 output_lines = []
 
@@ -256,7 +495,26 @@ output_lines.append(f"{'Density:':<30}{rho:>10.3e} g/cm^3")
 output_lines.append("")
 output_lines.append(f"{'Time step:':<30}{sim.dt:>10.3f} ps")
 output_lines.append(f"{'Number of time steps:':<30}{sim.n_steps:>10.0f}")
-output_lines.append(f"{'Simulation time:':<30}{sim.n_steps * sim.dt:>10.3e} ps")
+output_lines.append(
+    f"{'Simulation time:':<30}"
+    f"{sim.n_steps * sim.dt:>10.3e} ps"
+)
+
+output_lines.append(
+    f"{'Neighbour update interval:':<30}"
+    f"{n_update:>10}"
+)
+
+output_lines.append(
+    f"{'Neighbour-list rebuilds:':<30}"
+    f"{ps.neighbour_rebuilds:>10}"
+)
+
+output_lines.append(
+    f"{'Output sample interval:':<30}"
+    f"{sample_every:>10}"
+)
+
 output_lines.append("")
 if NVT:
     output_lines.append(f"{'Ensemble:':<30}{'NVT':>10}")
@@ -278,19 +536,58 @@ output_lines.append(f"{'Final LJ pairs:':<30}{n_total_final:>10}")
 output_lines.append(f"{'Final pairs in cutoff:':<30}{n_cut_final:>10}")
 output_lines.append(f"{'Final pairs in cutoff [%]:':<30}{percent_cut_final:>10.4f}")
 
-output_lines.append("----------------------------------------------------------")
-if elapsed_time:
-    time_per_time_step = elapsed_time / sim.n_steps
-    md_time_per_step = md_elapsed_time / sim.n_steps
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    output_lines.append(f"{'Total elapsed time:':<30}{elapsed_time:>10.3f} s")
-    output_lines.append(f"{'Total time per step:':<30}{time_per_time_step:>10.3f} s")
-    output_lines.append(f"{'MD elapsed time:':<30}{md_elapsed_time:>10.3f} s")
-    output_lines.append(f"{'MD time per step:':<30}{md_time_per_step:>10.3f} s")
-    output_lines.append(f"{'Time stamp:':<30}{now}")
-output_lines.append("----------------------------------------------------------")
+output_lines.append(
+    "----------------------------------------------------------"
+)
+
+total_time_per_step = (
+    total_elapsed_time
+    / sim.n_steps
+)
+
+md_time_per_step = (
+    md_elapsed_time
+    / sim.n_steps
+)
+
+now = datetime.now().strftime(
+    "%Y-%m-%d %H:%M:%S"
+)
+
+output_lines.append(
+    f"{'Total elapsed time:':<30}"
+    f"{total_elapsed_time:>10.3f} s"
+)
+
+output_lines.append(
+    f"{'Total time per step:':<30}"
+    f"{total_time_per_step:>10.6f} s"
+)
+
+output_lines.append(
+    f"{'MD elapsed time:':<30}"
+    f"{md_elapsed_time:>10.3f} s"
+)
+
+output_lines.append(
+    f"{'MD time per step:':<30}"
+    f"{md_time_per_step:>10.6f} s"
+)
+
+output_lines.append(
+    f"{'Time stamp:':<30}"
+    f"{now}"
+)
+
+output_lines.append(
+    "----------------------------------------------------------"
+)
+
 output_lines.append("END")
-output_lines.append("----------------------------------------------------------")
+
+output_lines.append(
+    "----------------------------------------------------------"
+)
 
 for line in output_lines:
     print(line)

@@ -162,24 +162,64 @@ class SimulationParameters:
 #----------------------------------------------------------------
 #   C O N V E R S I O N
 #----------------------------------------------------------------
-def move_particle_system_to_torch(ps: ParticleSystem, device=None, dtype=torch.float32):
+def move_particle_system_to_torch(
+    ps: ParticleSystem,
+    device=None,
+    dtype=torch.float32
+):
     """
-    Convert the arrays in ParticleSystem from NumPy arrays to PyTorch tensors.
-
-    Do this after initialize_positions() and initialize_velocities(). From this
-    point on, positions, velocities, forces, masses, sigma and epsilon stay on
-    the selected device.
+    Convert ParticleSystem arrays to tensors and cache constants
+    that do not change during the simulation.
     """
     if device is None:
         device = get_torch_device()
 
-    ps.mass = torch.as_tensor(ps.mass, dtype=dtype, device=device)
-    ps.sigma = torch.as_tensor(ps.sigma, dtype=dtype, device=device)
-    ps.epsilon = torch.as_tensor(ps.epsilon, dtype=dtype, device=device)
-    ps.position = torch.as_tensor(ps.position, dtype=dtype, device=device)
-    ps.velocity = torch.as_tensor(ps.velocity, dtype=dtype, device=device)
-    ps.force = torch.as_tensor(ps.force, dtype=dtype, device=device)
-    ps.random_number = torch.as_tensor(ps.random_number, dtype=dtype, device=device)
+    ps.mass = torch.as_tensor(
+        ps.mass,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.sigma = torch.as_tensor(
+        ps.sigma,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.epsilon = torch.as_tensor(
+        ps.epsilon,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.position = torch.as_tensor(
+        ps.position,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.velocity = torch.as_tensor(
+        ps.velocity,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.force = torch.as_tensor(
+        ps.force,
+        dtype=dtype,
+        device=device
+    )
+
+    ps.random_number = torch.as_tensor(
+        ps.random_number,
+        dtype=dtype,
+        device=device
+    )
+
+    # Masses remain constant.
+    ps.inverse_mass = torch.reciprocal(
+        ps.mass
+    )
 
     return device
 
@@ -220,162 +260,155 @@ def initialize_velocities(ps: ParticleSystem, temperature: float):
 # nachbarliste def #updated, so dass auch aktualisiert wenn ein teilchen mehr als die halbe skin bewegt hat
 #--------------------------------------
 
-def update_neighbour_list(ps: ParticleSystem, sim: SimulationParameters, step: int, n_update: int = 10):
+def update_neighbour_list(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    step: int,
+    n_update: int = 10
+):
+    """
+    Build and update the neighbour list entirely with Torch.
+
+    The neighbour list is built initially and then every
+    n_update MD steps. Between updates, the stored pair list
+    is reused.
+
+    All distance calculations remain on the selected Torch
+    device: CUDA, MPS or CPU fallback.
+    """
+
     if n_update < 1:
-        raise ValueError("n_update must be at least 1")
+        raise ValueError(
+            "n_update must be at least 1"
+        )
 
     if not sim.use_cutoff or sim.r_cut is None:
-        raise ValueError("neighbour list requires use_cutoff=True and r_cut")
+        raise ValueError(
+            "neighbour list requires "
+            "use_cutoff=True and r_cut"
+        )
 
-    rebuild = False
+    if not torch.is_tensor(ps.position):
+        raise TypeError(
+            "update_neighbour_list requires "
+            "Torch tensors"
+        )
 
-    if not hasattr(ps, "neighbour_pairs"):
-        ps.rcut = sim.r_cut
-        ps.neighbour_skin = 0.3 * ps.sigma[0]
+    first_build = not hasattr(
+        ps,
+        "neighbour_pairs"
+    )
+
+    # Reuse the current neighbour list unless this
+    # is an update step.
+    if (
+        not first_build
+        and step % n_update != 0
+    ):
+        return ps.neighbour_pairs
+
+    if first_build:
+        device = ps.position.device
+
+        # Keep the skin as a scalar tensor on the device.
+        ps.neighbour_skin = (
+            0.3 * ps.sigma[0]
+        )
 
         ps.neighbour_pairs = torch.empty(
             (0, 2),
             dtype=torch.long,
-            device=ps.position.device
+            device=device
         )
 
-        ps.neighbour_list_step = -n_update
-        ps.neighbour_reference_position = ps.position.clone()
-        rebuild = True
+        ps.neighbour_list_step = -1
+        ps.neighbour_rebuilds = 0
 
-    else:
-        displacement = ps.position - ps.neighbour_reference_position
-
-        displacement = displacement - sim.box_length * torch.round(
-            displacement / sim.box_length
-        )
-
-        displacement = torch.sqrt(
-            torch.sum(displacement**2, dim=1)
-        )
-
-        max_displacement = torch.max(displacement).item()
-        half_skin = 0.5 * ps.neighbour_skin.item()
-
-        if step - ps.neighbour_list_step >= n_update:
-            rebuild = True
-
-        if max_displacement > half_skin:
-            rebuild = True
-
-    if step == 0:
-        rebuild = True
-
-    if rebuild:
-        i, j = torch.triu_indices(
+        # Generate the complete list of unique pair indices
+        # only once. These indices remain on the device and
+        # are reused at every neighbour-list update.
+        all_pairs = torch.triu_indices(
             ps.n,
             ps.n,
             offset=1,
-            device=ps.position.device
+            device=device
         )
 
-        rij = ps.position[i] - ps.position[j]
+        ps.all_pair_i = all_pairs[0]
+        ps.all_pair_j = all_pairs[1]
 
-        rij = rij - sim.box_length * torch.round(
+    i_pairs = ps.all_pair_i
+    j_pairs = ps.all_pair_j
+
+    # Pair displacement vectors.
+    rij = (
+        ps.position[i_pairs]
+        - ps.position[j_pairs]
+    )
+
+    # Minimum-image periodic boundary conditions.
+    rij -= (
+        sim.box_length
+        * torch.round(
             rij / sim.box_length
         )
+    )
 
-        r2 = torch.sum(rij**2, dim=1)
+    # Squared distances; no square root is required.
+    r_squared = torch.sum(
+        rij * rij,
+        dim=1
+    )
 
-        list_cutoff = ps.rcut + ps.neighbour_skin
-        mask = r2 <= list_cutoff**2
+    # The neighbour list uses cutoff + skin.
+    list_cutoff = (
+        sim.r_cut
+        + ps.neighbour_skin
+    )
 
-        ps.neighbour_pairs = torch.column_stack(
-            (i[mask], j[mask])
-        )
+    inside_neighbour_list = (
+        r_squared
+        <= list_cutoff * list_cutoff
+    )
 
-        ps.neighbour_list_step = step
-        ps.neighbour_reference_position = ps.position.clone()
+    # Store only pairs inside cutoff + skin.
+    ps.neighbour_pairs = torch.stack(
+        (
+            i_pairs[inside_neighbour_list],
+            j_pairs[inside_neighbour_list]
+        ),
+        dim=1
+    )
 
-    return ps.neighbour_pairs
+    ps.neighbour_list_step = step
+    ps.neighbour_rebuilds += 1
 
+    return ps.neighbour_pairs   
 
 #----------------------------------------------------------------
 #   E N E R G I E S / P R O P E R T I E S #Neigbbouhr list verwenden, rest bleibt als backup da
 #----------------------------------------------------------------
-def potential_energy(ps: ParticleSystem, sim: SimulationParameters) -> float:
-    sigma = ps.sigma[0]
-    epsilon = ps.epsilon[0]
-
-    if torch.is_tensor(ps.position):
-        if not hasattr(ps, "neighbour_pairs"):
-            raise ValueError("neighbour list was not created")
-
-        i_pairs = ps.neighbour_pairs[:, 0]
-        j_pairs = ps.neighbour_pairs[:, 1]
-
-        if i_pairs.numel() == 0:
-            return 0.0
-
-        rij = ps.position[i_pairs] - ps.position[j_pairs]
-
-        rij = rij - sim.box_length * torch.round(
-            rij / sim.box_length
+def potential_energy(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+) -> float:
+    """
+    Return the energy already calculated together
+    with the forces.
+    """
+    if not hasattr(
+        ps,
+        "current_potential_energy"
+    ):
+        raise ValueError(
+            "forces must be calculated before "
+            "potential_energy"
         )
 
-        r = torch.sqrt(
-            torch.sum(rij**2, dim=1)
-        )
-
-        if sim.use_cutoff and sim.r_cut is not None:
-            r = r[r <= sim.r_cut]
-
-        if r.numel() == 0:
-            return 0.0
-
-        r = torch.clamp(r, min=sim.rij_min)
-
-        sr6 = (sigma / r) ** 6
-        pair_energy = 4 * epsilon * (sr6**2 - sr6)
-
-        return tensor_to_float(
-            torch.sum(pair_energy)
-        )
-
-    rij_matrix = (
-        ps.position[:, np.newaxis, :]
-        - ps.position[np.newaxis, :, :]
+    return tensor_to_float(
+        ps.current_potential_energy
     )
 
-    rij_matrix = rij_matrix - sim.box_length * np.rint(
-        rij_matrix / sim.box_length
-    )
-
-    r_matrix = np.linalg.norm(
-        rij_matrix,
-        axis=-1
-    )
-
-    i_pairs, j_pairs = np.triu_indices(
-        ps.n,
-        k=1
-    )
-
-    r = r_matrix[i_pairs, j_pairs]
-
-    if sim.use_cutoff and sim.r_cut is not None:
-        r = r[r <= sim.r_cut]
-
-    if r.size == 0:
-        return 0.0
-
-    r = np.clip(
-        r,
-        sim.rij_min,
-        None
-    )
-
-    sr6 = (sigma / r) ** 6
-    pair_energy = 4 * epsilon * (sr6**2 - sr6)
-
-    return float(
-        np.sum(pair_energy)
-    )
 
 
 def kinetic_energy(ps: ParticleSystem) -> float:
@@ -428,133 +461,316 @@ def calculate_force(ps: ParticleSystem, sim: SimulationParameters):
 
 
 #kein nutzen der NXN matrix mehr als ganzes, nur noch neighbour list
-def calculate_force_torch(ps: ParticleSystem, sim: SimulationParameters):
-    if not torch.is_tensor(ps.position):
-        raise TypeError("calculate_force_torch requires torch tensors")
+def calculate_force_torch(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+):
+    """
+    Calculate cutoff Lennard-Jones forces from
+    the current neighbour list.
 
-    if not hasattr(ps, "neighbour_pairs"):
-        raise ValueError("neighbour list was not created")
+    Squared distances are used throughout.
+    The potential energy is calculated from the
+    same pair data.
+    """
+    if not torch.is_tensor(ps.position):
+        raise TypeError(
+            "calculate_force_torch requires "
+            "torch tensors"
+        )
+
+    if not hasattr(
+        ps,
+        "neighbour_pairs"
+    ):
+        raise ValueError(
+            "neighbour list was not created"
+        )
+
+    # Reuse the existing force tensor.
+    ps.force.zero_()
+
+    if ps.neighbour_pairs.numel() == 0:
+        ps.current_potential_energy = (
+            ps.position.new_zeros(())
+        )
+
+        return None
+
+    i_pairs = (
+        ps.neighbour_pairs[:, 0]
+    )
+
+    j_pairs = (
+        ps.neighbour_pairs[:, 1]
+    )
+
+    rij = (
+        ps.position[i_pairs]
+        - ps.position[j_pairs]
+    )
+
+    rij -= (
+        sim.box_length
+        * torch.round(
+            rij / sim.box_length
+        )
+    )
+
+    # No square root is required.
+    r_squared = torch.sum(
+        rij * rij,
+        dim=1
+    )
+
+    inside_cutoff = (
+        r_squared
+        <= sim.r_cut * sim.r_cut
+    )
+
+    i_pairs = i_pairs[
+        inside_cutoff
+    ]
+
+    j_pairs = j_pairs[
+        inside_cutoff
+    ]
+
+    rij = rij[
+        inside_cutoff
+    ]
+
+    r_squared = r_squared[
+        inside_cutoff
+    ]
+
+    if r_squared.numel() == 0:
+        ps.current_potential_energy = (
+            ps.position.new_zeros(())
+        )
+
+        return None
+
+    minimum_r_squared = max(
+        sim.rij_min * sim.rij_min,
+        1e-24
+    )
+
+    r_squared = torch.clamp(
+        r_squared,
+        min=minimum_r_squared
+    )
 
     sigma = ps.sigma[0]
     epsilon = ps.epsilon[0]
 
-    i_pairs = ps.neighbour_pairs[:, 0]
-    j_pairs = ps.neighbour_pairs[:, 1]
-
-    if i_pairs.numel() == 0:
-        ps.force = torch.zeros_like(ps.position)
-        return None
-
-    rij = ps.position[i_pairs] - ps.position[j_pairs]
-
-    rij = rij - sim.box_length * torch.round(
-        rij / sim.box_length
+    inverse_r_squared = (
+        torch.reciprocal(
+            r_squared
+        )
     )
 
-    r = torch.sqrt(
-        torch.sum(rij**2, dim=1)
+    sigma_over_r_squared = (
+        sigma
+        * sigma
+        * inverse_r_squared
     )
 
-    if sim.use_cutoff and sim.r_cut is not None:
-        mask = r <= sim.r_cut
-
-        i_pairs = i_pairs[mask]
-        j_pairs = j_pairs[mask]
-        rij = rij[mask]
-        r = r[mask]
-
-    if r.numel() == 0:
-        ps.force = torch.zeros_like(ps.position)
-        return None
-
-    r = torch.clamp(
-        r,
-        min=sim.rij_min
+    sr6 = (
+        sigma_over_r_squared**3
     )
 
-    rij_length = torch.sqrt(
-        torch.sum(rij**2, dim=1)
-    )
+    sr12 = sr6 * sr6
 
-    rij_length = torch.clamp(
-        rij_length,
-        min=sim.rij_min
-    )
-
-    rij = rij / rij_length[:, None] * r[:, None]
-
-    sr6 = (sigma / r) ** 6
-
-    dV_dr = (
-        24
+    force_factor = (
+        24.0
         * epsilon
-        / r
-        * (-2 * sr6**2 + sr6)
+        * inverse_r_squared
+        * (
+            2.0 * sr12
+            - sr6
+        )
     )
 
     pair_force = (
-        dV_dr[:, None]
-        / r[:, None]
+        force_factor[:, None]
         * rij
     )
 
-    force = torch.zeros_like(
-        ps.position
-    )
-
-    force.index_add_(
+    ps.force.index_add_(
         0,
         i_pairs,
-        -pair_force
-    )
-
-    force.index_add_(
-        0,
-        j_pairs,
         pair_force
     )
 
-    ps.force = force
+    ps.force.index_add_(
+        0,
+        j_pairs,
+        -pair_force
+    )
+
+    # Reuse the same distances for the energy.
+    ps.current_potential_energy = (
+        torch.sum(
+            4.0
+            * epsilon
+            * (
+                sr12
+                - sr6
+            )
+        )
+    )
 
     return None
 
 #----------------------------------------------------------------
 #   M D   I N T E G R A T O R S
 #----------------------------------------------------------------
-def A_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
-    """Position update."""
-    dt = 0.5 * sim.dt if half_step else sim.dt
-    ps.position = ps.position + ps.velocity * dt
+def A_step(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    half_step=False
+):
+    """In-place position update."""
+    dt = (
+        0.5 * sim.dt
+        if half_step
+        else sim.dt
+    )
+
+    ps.position.add_(
+        ps.velocity,
+        alpha=dt
+    )
+
     return None
 
 
-def B_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
-    """Velocity update from current forces."""
-    dt = 0.5 * sim.dt if half_step else sim.dt
-    ps.velocity = ps.velocity + (1 / ps.mass)[:, None] * dt * ps.force
+def B_step(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    half_step=False
+):
+    """
+    In-place velocity update using cached
+    inverse masses.
+    """
+    dt = (
+        0.5 * sim.dt
+        if half_step
+        else sim.dt
+    )
+
+    if not hasattr(
+        ps,
+        "inverse_mass"
+    ):
+        ps.inverse_mass = (
+            torch.reciprocal(
+                ps.mass
+            )
+        )
+
+    ps.velocity.add_(
+        ps.inverse_mass[:, None]
+        * ps.force,
+        alpha=dt
+    )
+
     return None
 
 
-def O_step(ps: ParticleSystem, sim: SimulationParameters, half_step=False):
-    """Langevin thermostat step using torch operations."""
+def O_step(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    half_step=False
+):
+    """
+    In-place Langevin thermostat step with
+    cached constants.
+    """
     if not torch.is_tensor(ps.velocity):
-        raise TypeError("O_step in LJ_gas_torch requires torch tensors.")
+        raise TypeError(
+            "O_step in LJ_gas_torch requires "
+            "torch tensors."
+        )
 
-    dt = 0.5 * sim.dt if half_step else sim.dt
-    device = ps.velocity.device
-    dtype = ps.velocity.dtype
+    dt = (
+        0.5 * sim.dt
+        if half_step
+        else sim.dt
+    )
 
-    ps.random_number = torch.randn((ps.n, 3), dtype=dtype, device=device)
+    cache_key = (
+        dt,
+        sim.xi,
+        sim.temperature
+    )
 
-    d = torch.exp(torch.tensor(-sim.xi * dt, dtype=dtype, device=device))
+    if (
+        getattr(
+            ps,
+            "_thermostat_cache_key",
+            None
+        )
+        != cache_key
+    ):
+        dtype = ps.velocity.dtype
+        device = ps.velocity.device
 
-    scalar = sim.temperature * R * (1.0 - np.exp(-2 * sim.xi * dt))
+        ps.thermostat_decay = (
+            torch.exp(
+                torch.as_tensor(
+                    -sim.xi * dt,
+                    dtype=dtype,
+                    device=device
+                )
+            )
+        )
 
-    # Original code uses mass * 1e3 here. Keep this convention for consistency.
-    mass = ps.mass * 1e3
-    f = torch.sqrt(torch.as_tensor(scalar, dtype=dtype, device=device) / mass)[:, None]
+        scalar = (
+            sim.temperature
+            * R
+            * (
+                1.0
+                - np.exp(
+                    -2.0
+                    * sim.xi
+                    * dt
+                )
+            )
+        )
 
-    ps.velocity = d * ps.velocity + f * ps.random_number
+        ps.thermostat_noise_scale = (
+            torch.sqrt(
+                torch.as_tensor(
+                    scalar,
+                    dtype=dtype,
+                    device=device
+                )
+                / (
+                    ps.mass
+                    * 1e3
+                )
+            )[:, None]
+        )
+
+        ps._thermostat_cache_key = (
+            cache_key
+        )
+
+    # Reuse the existing random-number tensor.
+    ps.random_number.normal_()
+
+    ps.velocity.mul_(
+        ps.thermostat_decay
+    )
+
+    ps.velocity.add_(
+        ps.thermostat_noise_scale
+        * ps.random_number
+    )
+
     return None
 
 
@@ -610,12 +826,25 @@ def simulate_NVT_step(ps: ParticleSystem, sim: SimulationParameters, step: int, 
 
     return None
 
-def apply_periodic_boundary(ps: ParticleSystem, sim: SimulationParameters):
-    """Wrap positions back into the simulation box."""
+def apply_periodic_boundary(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+):
+    """
+    Wrap positions into the simulation box
+    in place.
+    """
     if torch.is_tensor(ps.position):
-        ps.position = torch.remainder(ps.position, sim.box_length)
+        ps.position.remainder_(
+            sim.box_length
+        )
     else:
-        ps.position = np.mod(ps.position, sim.box_length)
+        np.mod(
+            ps.position,
+            sim.box_length,
+            out=ps.position
+        )
+
     return None
 
 
@@ -639,38 +868,87 @@ def write_xyz_trajectory(filename, trajectory, atom_symbol="Ar"):
 #----------------------------------------------------------------
 #   S T A T I S T I C S
 #----------------------------------------------------------------
-def cutoff_pair_statistics(ps: ParticleSystem, sim: SimulationParameters):
+def cutoff_pair_statistics(
+    ps: ParticleSystem,
+    sim: SimulationParameters
+):
     """
-    Count how many unique particle pairs are inside the cutoff radius.
-
-    Returns:
-        n_pairs_total (int): total number of unique pairs i < j
-        n_pairs_cutoff (int): number of pairs with r <= r_cut
-        percent_pairs_cutoff (float): percentage of pairs inside the cutoff
+    Count current cutoff pairs using the
+    existing neighbour list.
     """
     if sim.r_cut is None:
-        raise ValueError("r_cut must be set to calculate cutoff pair statistics.")
+        raise ValueError(
+            "r_cut must be set to calculate "
+            "cutoff pair statistics."
+        )
 
-    n_particles = ps.n
-    L = sim.box_length
+    if not hasattr(
+        ps,
+        "neighbour_pairs"
+    ):
+        raise ValueError(
+            "neighbour list was not created"
+        )
 
-    if torch.is_tensor(ps.position):
-        device = ps.position.device
-        rij_matrix = ps.position[:, None, :] - ps.position[None, :, :]
-        rij_matrix = rij_matrix - L * torch.round(rij_matrix / L)
-        r_matrix = torch.linalg.norm(rij_matrix, dim=-1)
-        i_pairs, j_pairs = torch.triu_indices(n_particles, n_particles, offset=1, device=device)
-        r = r_matrix[i_pairs, j_pairs]
-        n_pairs_total = int(r.numel())
-        n_pairs_cutoff = int(torch.sum(r <= sim.r_cut).detach().cpu().item())
-    else:
-        rij_matrix = ps.position[:, np.newaxis, :] - ps.position[np.newaxis, :, :]
-        rij_matrix -= L * np.rint(rij_matrix / L)
-        r_matrix = np.linalg.norm(rij_matrix, axis=-1)
-        i_upper = np.triu_indices(n_particles, k=1)
-        r = r_matrix[i_upper]
-        n_pairs_total = int(r.size)
-        n_pairs_cutoff = int(np.sum(r <= sim.r_cut))
+    n_pairs_total = (
+        ps.n
+        * (ps.n - 1)
+        // 2
+    )
 
-    percent_pairs_cutoff = 100 * n_pairs_cutoff / n_pairs_total if n_pairs_total > 0 else 0.0
-    return n_pairs_total, n_pairs_cutoff, percent_pairs_cutoff
+    if ps.neighbour_pairs.numel() == 0:
+        return (
+            n_pairs_total,
+            0,
+            0.0
+        )
+
+    i_pairs = (
+        ps.neighbour_pairs[:, 0]
+    )
+
+    j_pairs = (
+        ps.neighbour_pairs[:, 1]
+    )
+
+    rij = (
+        ps.position[i_pairs]
+        - ps.position[j_pairs]
+    )
+
+    rij -= (
+        sim.box_length
+        * torch.round(
+            rij / sim.box_length
+        )
+    )
+
+    r_squared = torch.sum(
+        rij * rij,
+        dim=1
+    )
+
+    n_pairs_cutoff = int(
+        torch.count_nonzero(
+            r_squared
+            <= sim.r_cut
+            * sim.r_cut
+        )
+        .detach()
+        .cpu()
+        .item()
+    )
+
+    percent_pairs_cutoff = (
+        100.0
+        * n_pairs_cutoff
+        / n_pairs_total
+        if n_pairs_total > 0
+        else 0.0
+    )
+
+    return (
+        n_pairs_total,
+        n_pairs_cutoff,
+        percent_pairs_cutoff
+    )
