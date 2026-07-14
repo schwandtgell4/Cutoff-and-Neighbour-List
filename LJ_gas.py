@@ -796,5 +796,5 @@ def cutoff_pair_statistics(
     return (
         n_pairs_total,
         n_pairs_cutoff,
-        percent_pairs_cutoffx
+        percent_pairs_cutoff
     )

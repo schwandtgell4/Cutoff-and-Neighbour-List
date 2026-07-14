@@ -65,6 +65,44 @@ def toc():
     
     return elapsed_time
 
+def save_plot(
+    x,
+    y,
+    filename,
+    xlabel,
+    ylabel,
+    y_margin
+):
+    """Save one plot without opening a blocking window."""
+
+    y_mean = np.mean(y)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(x, y)
+
+    plt.ylim(
+        y_mean - y_margin,
+        y_mean + y_margin
+    )
+
+    plt.xlabel(
+        xlabel,
+        fontsize=14
+    )
+
+    plt.ylabel(
+        ylabel,
+        fontsize=14
+    )
+
+    plt.savefig(
+        filename,
+        dpi=300,
+        bbox_inches="tight"
+    )
+
+    # Close the figure instead of opening it with plt.show().
+    plt.close()
 
 #----------------------------------------------------------------
 #   P A R A M E T E R S
@@ -190,6 +228,7 @@ else:
 #--------------------------------------------------
 print("Starting MD simulation...", flush=True)
 
+md_start_time = time.perf_counter()
 # Measure only the MD simulation loop.
 tic()
 
@@ -257,7 +296,16 @@ for i in range(sim.n_steps):
 
 elapsed_time = toc()
 
-print("MD simulation finished.", flush=True)
+md_elapsed_time = (
+    time.perf_counter()
+    - md_start_time
+)
+
+print(
+    "MD simulation finished. "
+    "Writing output files...",
+    flush=True
+)
 
 print(
     f"MD loop time: "
@@ -294,69 +342,47 @@ np.savetxt(file_name_base + "_ene.dat", energy_trajectory, fmt="%.6e", header="#
 #----------------------------------------------------
 # P L O T   E N E R G Y   T R A J E C T O R I E S
 #----------------------------------------------------
+
 # set time axis
-time_ps = np.arange(sim.n_steps + 1) * sim.dt
+time_ps = np.arange(
+    sim.n_steps + 1
+) * sim.dt
 
-#
-# potential energy
-# 
-E_pot_min = np.mean(energy_trajectory[:,0]) - 1   # lower limit of E_pot axis
-E_pot_max = np.mean(energy_trajectory[:,0]) + 1   # upper limit of E_pot axis 
+save_plot(
+    time_ps,
+    energy_trajectory[:, 0],
+    file_name_base + "_Epot.png",
+    "time [ps]",
+    "E_pot [kJ/mol]",
+    1
+)
 
-plt.figure(figsize=(8, 6))
-plt.plot(time_ps, energy_trajectory[:,0]) 
-plt.ylim(E_pot_min, E_pot_max)
-plt.xlabel("time [ps]", fontsize=14)
-plt.ylabel("E_pot [kJ/mol]", fontsize=14)
+save_plot(
+    time_ps,
+    energy_trajectory[:, 1],
+    file_name_base + "_Ekin.png",
+    "time [ps]",
+    "E_kin [kJ/mol]",
+    100
+)
 
-plt.savefig(file_name_base + "_Epot.png", dpi=300, bbox_inches='tight')
-plt.show()
+save_plot(
+    time_ps,
+    energy_trajectory[:, 2],
+    file_name_base + "_T.png",
+    "time [ps]",
+    "T [K]",
+    100
+)
 
-#
-# kinetic energy
-# 
-E_kin_min = np.mean(energy_trajectory[:,1]) - 100   # lower limit of E_kin axis
-E_kin_max = np.mean(energy_trajectory[:,1]) + 100   # upper limit of E_kin axis 
-
-plt.figure(figsize=(8, 6))
-plt.plot(time_ps, energy_trajectory[:,1]) 
-plt.ylim(E_kin_min, E_kin_max)
-plt.xlabel("time [ps]", fontsize=14)
-plt.ylabel("E_kin [kJ/mol]", fontsize=14)
-
-plt.savefig(file_name_base + "_Ekin.png", dpi=300, bbox_inches='tight')
-plt.show()
-
-#
-# temperature
-# 
-T_min = np.mean(energy_trajectory[:,2]) - 100   # lower limit of T axis
-T_max = np.mean(energy_trajectory[:,2]) + 100   # upper limit of T axis 
-
-plt.figure(figsize=(8, 6))
-plt.plot(time_ps, energy_trajectory[:,2]) 
-plt.ylim(T_min, T_max)
-plt.xlabel("time [ps]", fontsize=14)
-plt.ylabel("T [K]", fontsize=14)
-
-plt.savefig(file_name_base + "_T.png", dpi=300, bbox_inches='tight')
-plt.show()
-
-#
-# pressure
-# 
-P_min = np.mean(energy_trajectory[:,3]) - 200   # lower limit of P axis
-P_max = np.mean(energy_trajectory[:,3]) + 200   # upper limit of P axis 
-
-plt.figure(figsize=(8, 6))
-plt.plot(time_ps, energy_trajectory[:,3]) 
-plt.ylim(P_min, P_max)
-plt.xlabel("time [ps]", fontsize=14)
-plt.ylabel("P [Pa]", fontsize=14)
-
-plt.savefig(file_name_base + "_P.png", dpi=300, bbox_inches='tight')
-plt.show()
-
+save_plot(
+    time_ps,
+    energy_trajectory[:, 3],
+    file_name_base + "_P.png",
+    "time [ps]",
+    "P [Pa]",
+    200
+)
 
 #--------------------------------------
 # O U T P U T 
