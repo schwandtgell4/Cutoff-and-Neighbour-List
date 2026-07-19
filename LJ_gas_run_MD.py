@@ -122,10 +122,8 @@ tau_thermostat = 1  # thermostat coupling constant in 1/ps
 rij_min = 1e-2      # nm
 NVT = True          # switch to decide between NVT and NVE
 n_update = 10       # define how often list is updatet
-use_cutoff = True
 r_cut_factor = 20.5
-r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm; reference: (3.8) at page 15 of lecture script
-                            # sigma is LJ length scale and with 2.5 as factor
+r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm
 
 # output
 file_name_base = "my_simulation"  # file name for all output files
@@ -146,8 +144,7 @@ sim = SimulationParameters(
     box_length=box_length,
     tau_thermostat=tau_thermostat,
     rij_min=rij_min,
-    r_cut=r_cut,
-    use_cutoff=use_cutoff
+    r_cut=r_cut
 )
 
 #
@@ -418,9 +415,10 @@ else:
 
 output_lines.append("")     
 output_lines.append(f"{'Lower cutoff radius:':<30}{sim.rij_min:>10.3f} nm")
-
-output_lines.append(f"{'Use upper cutoff:':<30}{str(sim.use_cutoff):>10}")
 output_lines.append(f"{'Upper cutoff radius:':<30}{sim.r_cut:>10.3f} nm")
+output_lines.append(f"{'Neighbour-list skin:':<30}"f"{ps.neighbour_skin:>10.3f} nm")
+output_lines.append(f"{'List update interval:':<30}"f"{n_update:>10}")
+output_lines.append(f"{'Neighbour-list rebuilds:':<30}"f"{ps.neighbour_rebuilds:>10}")
 output_lines.append(f"{'Total LJ pairs:':<30}{n_total:>10}")
 output_lines.append(f"{'Pairs inside cutoff:':<30}{n_cut:>10}")
 output_lines.append(f"{'Pairs inside cutoff [%]:':<30}{percent_cut:>10.4f}")

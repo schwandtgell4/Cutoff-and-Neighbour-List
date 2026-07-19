@@ -1,10 +1,12 @@
 import os
+import sys
 import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.constants import R
 from itertools import product
+from pathlib import Path
 
 from LJ_gas import ParticleSystem
 from LJ_gas import SimulationParameters
@@ -15,29 +17,109 @@ from LJ_gas import calculate_force
 from LJ_gas import simulate_NVT_step
 from LJ_gas import kinetic_energy
 from LJ_gas import density
+from LJ_gas import instantaneous_temperature
+from LJ_gas import potential_energy
 
-n_particles = 2000
+n_particles = 100
 mass_argon = 39.95
 sigma_argon = 0.34
 epsilon_argon = 120 * R * 1e-3
 
 dt = 0.1
-n_steps = 1000
+n_steps = 10
 temperature = 300
 box_length_start = 100
 tau_thermostat = 1
 rij_min = 1e-2
 
-n_update_werte = list(range(1, 11))
-cutoff_faktoren = [1, 2, 3, 5, 10, 20]
-dichte_faktoren = [0.5, 1.0, 1.5]
-seeds = [1, 2, 3, 4, 5]
+n_equil_steps = 200 # steps used for equilibration
+equilibration_sample_interval = 10  # Record equilibration observables every 10 steps
+equilibration_n_update = 1 # neighbor list is rebuild after every step during equilibration
+
+n_update_werte = list(range(1, 5))
+cutoff_faktoren = [2.5, 5]
+dichte_faktoren = [1.0]
+seeds = [1]
+equilibration_cutoff_factor = max(cutoff_faktoren) # use largest cutoff during equilibration
 
 ordner = "doe_ergebnisse"
 os.makedirs(ordner, exist_ok=True)
 
+equilibrium_states = {} # save pos + velocity 
+equilibration_history = [] # save temp + ekin
+
 ergebnisse = []
 
+print(
+    "Creating common equilibrated states...",
+    flush=True
+)
+
+for dichte_faktor, seed in product(
+    dichte_faktoren,
+    seeds
+):
+    # Use a reproducible initialization and thermostat sequence.
+    np.random.seed(seed)
+
+    box_length = (box_length_start / dichte_faktor ** (1.0 / 3.0))
+
+    r_cut_equilibration = (equilibration_cutoff_factor * sigma_argon)
+
+    sim_equilibration = SimulationParameters(
+        dt=dt,
+        n_steps=n_equil_steps,
+        temperature=temperature,
+        box_length=box_length,
+        tau_thermostat=tau_thermostat,
+        rij_min=rij_min,
+        r_cut=r_cut_equilibration
+    )
+
+    ps_equilibration = ParticleSystem(n_particles)
+
+    ps_equilibration.mass[:] = (mass_argon)
+
+    ps_equilibration.sigma[:] = (sigma_argon)
+
+    ps_equilibration.epsilon[:] = (epsilon_argon)
+
+    initialize_positions(ps_equilibration, sim_equilibration.box_length)
+
+    initialize_velocities(ps_equilibration, sim_equilibration.temperature)
+
+    update_neighbour_list(
+        ps_equilibration,
+        sim_equilibration,
+        step=0,
+        n_update=equilibration_n_update
+    )
+
+    calculate_force(ps_equilibration, sim_equilibration)
+    for equilibration_step in range(1, n_equil_steps + 1):
+        simulate_NVT_step(
+            ps_equilibration,
+            sim_equilibration,
+            equilibration_step,
+            equilibration_n_update
+        )
+        if (equilibration_step% equilibration_sample_interval== 0):
+            equilibration_history.append({
+                "dichte_faktor": (dichte_faktor),
+                "seed": seed,
+                "step": (equilibration_step),
+                "temperature_K": (instantaneous_temperature(ps_equilibration)),
+                "potential_energy_kJ_mol": (potential_energy(ps_equilibration, sim_equilibration)
+                )})
+    equilibrium_states[(dichte_faktor, seed)] = {
+        "position": (ps_equilibration.position.copy()),
+        "velocity": (ps_equilibration.velocity.copy())
+    }
+    print("Equilibrated state finished:", f"density factor={dichte_faktor}", f"seed={seed}",flush=True)
+
+equilibration_table = pd.DataFrame(equilibration_history)
+
+equilibration_table.to_csv(os.path.join(ordner,"equilibration_history.csv"),index=False)
 kombinationen = list(product(n_update_werte, cutoff_faktoren, dichte_faktoren, seeds))
 
 zufall_reihenfolge = np.random.default_rng(12345)
@@ -51,7 +133,8 @@ for nummer, kombination in enumerate(kombinationen):
     dichte_faktor = kombination[2]
     seed = kombination[3]
 
-    np.random.seed(seed)
+    production_seed = (100000 + seed)
+    np.random.seed(production_seed)
 
     box_length = box_length_start / dichte_faktor ** (1 / 3)
     r_cut = cutoff_faktor * sigma_argon
@@ -63,18 +146,18 @@ for nummer, kombination in enumerate(kombinationen):
         box_length=box_length,
         tau_thermostat=tau_thermostat,
         rij_min=rij_min,
-        r_cut=r_cut,
-        use_cutoff=True
+        r_cut=r_cut
     )
 
     ps = ParticleSystem(n_particles)
     ps.mass[:] = mass_argon
     ps.sigma[:] = sigma_argon
     ps.epsilon[:] = epsilon_argon
+    equilibrium_state = (equilibrium_states[(dichte_faktor, seed)])
+    ps.position[:] = (equilibrium_state["position"])
+    ps.velocity[:] = (equilibrium_state["velocity"])
 
-    initialize_positions(ps, sim.box_length)
-    initialize_velocities(ps, sim.temperature)
-    update_neighbour_list(ps, sim, 0, n_update)
+    update_neighbour_list(ps, sim, step=0, n_update=n_update)
     calculate_force(ps, sim)
 
     temperaturen = []

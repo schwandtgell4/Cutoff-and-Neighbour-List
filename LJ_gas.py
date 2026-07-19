@@ -72,7 +72,7 @@ class ParticleSystem:
 
 
 class SimulationParameters:
-    def __init__(self, dt, n_steps, temperature, box_length, tau_thermostat=None, rij_min=0.0, r_cut=None, use_cutoff=False):
+    def __init__(self, dt, n_steps, temperature, box_length, tau_thermostat=None, rij_min=0.0, r_cut=None):
         """ 
         Parameters:
             dt (float): Time step in ps.
@@ -85,7 +85,6 @@ class SimulationParameters:
                                                    If None, not thermostat is applied 
             rij_min (float) = 0.0: Lower cutoff for interparticle distances (in nm).
             r_cut: cutoff-radius: float in nm. Max distance which is considered.
-            use_cutoff: If True: use r_cut to ignore interactions beyond the cutoff. If False, calculate all pairwise LJ interactions.
         """
         self.dt = dt
         self.n_steps = n_steps
@@ -95,19 +94,17 @@ class SimulationParameters:
         self.rij_min = rij_min        # minimum allowed pairwise distance
 
         self.r_cut = r_cut            # cutoff radius for LJ interactions
-        self.use_cutoff = use_cutoff  # switch cutoff on/off
 
-        if self.use_cutoff:
-            if self.r_cut is None:
-                raise ValueError("use_cutoff=True requires r_cut to be set.")
+        if self.r_cut is None:
+            raise ValueError("r_cut needs to be set!")
 
-            # For periodic boundary conditions, r_cut must be <= L/2.
-            # Otherwise, a particle could interact with more than one periodic image
-            # of the very same particle, making the cutoff ambiguous. But only the NEAREST
-            # periodic image should be considered!
-            
-            if self.r_cut > 0.5 * self.box_length:
-                raise ValueError("r_cut is set larger than half the box length.")
+        # For periodic boundary conditions, r_cut must be <= L/2.
+        # Otherwise, a particle could interact with more than one periodic image
+        # of the very same particle, making the cutoff ambiguous. But only the NEAREST
+        # periodic image should be considered!
+        
+        if self.r_cut > 0.5 * self.box_length:
+            raise ValueError("r_cut is set larger than half the box length.")
 
         # Optional: friction coefficient for Langevin or stochastic thermostats
         self.xi = None
@@ -170,11 +167,6 @@ def update_neighbour_list(
 
     if n_update < 1:
         raise ValueError("n_update must be at least 1")
-
-    if not sim.use_cutoff or sim.r_cut is None:
-        raise ValueError(
-            "neighbour list requires use_cutoff=True and r_cut"
-        )
 
     first_build = not hasattr(ps, "neighbour_pairs")
 
