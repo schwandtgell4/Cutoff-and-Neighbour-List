@@ -20,24 +20,24 @@ from LJ_gas import density
 from LJ_gas import instantaneous_temperature
 from LJ_gas import potential_energy
 
-n_particles = 100
+n_particles = 2000
 mass_argon = 39.95
 sigma_argon = 0.34
 epsilon_argon = 120 * R * 1e-3
 
 dt = 0.1
-n_steps = 10
+n_steps = 1000
 temperature = 300
 box_length_start = 100
 tau_thermostat = 1
 rij_min = 1e-2
 
-n_equil_steps = 200 # steps used for equilibration
+n_equil_steps = 20000 # steps used for equilibration
 equilibration_sample_interval = 10  # Record equilibration observables every 10 steps
 equilibration_n_update = 1 # neighbor list is rebuild after every step during equilibration
 
 n_update_werte = list(range(1, 11))
-cutoff_faktoren = [1, 2, 3, 5, 10, 20]
+cutoff_faktoren = [1, 2, 2.5, 3, 5, 7.5, 10, 15, 20]
 dichte_faktoren = [0.5, 1.0, 1.5]
 seeds = [1, 2, 3, 4, 5]
 equilibration_cutoff_factor = max(cutoff_faktoren) # use largest cutoff during equilibration
