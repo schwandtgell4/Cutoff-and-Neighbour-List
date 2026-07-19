@@ -37,8 +37,8 @@ equilibration_sample_interval = 10  # Record equilibration observables every 10 
 equilibration_n_update = 1 # neighbor list is rebuild after every step during equilibration
 
 n_update_werte = list(range(1, 11))
-cutoff_faktoren = [2.5, 5, 7.5, 10]
-dichte_faktoren = [1.0]
+cutoff_faktoren = [1, 2, 2.5, 3, 5, 7.5, 10, 15, 20]
+dichte_faktoren = [0.5, 1.0, 1.5]
 seeds = [1, 2, 3, 4, 5]
 equilibration_cutoff_factor = max(cutoff_faktoren) # use largest cutoff during equilibration
 
