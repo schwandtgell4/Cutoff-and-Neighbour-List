@@ -27,20 +27,20 @@ from LJ_gas import (
 # -----------------------------------------------------------------------------
 # Parameters
 # -----------------------------------------------------------------------------
-n_particles = 2000
-mass_argon = 39.95
-sigma_argon = 0.34
-epsilon_argon = 120.0 * R * 1e-3
+n_particles = 1000
+mass_argon = 39.95                  # mass in u = 1e-3 kg/mol
+sigma_argon = 0.34                  # sigma in nm     Argon: 0.34
+epsilon_argon = 120.0 * R * 1e-3    # epsilon in kJ/mol Argon: 120
 
-dt = 0.1
-temperature = 300.0
-box_length_start = 100.0
-tau_thermostat = 1.0
-rij_min = 1e-2
+dt = 0.1                            # ps
+temperature = 300.0                 # K
+box_length_start = 100.0            # nm
+tau_thermostat = 1.0                # thermostat coupling constant in 1/ps
+rij_min = 1e-2                      # nm
 
 production_ensembles = ["NVE"] # NVE, NVT or NVE and NVT
 
-n_equil_steps = 2000 # number of steps to eq each initial system
+n_equil_steps = 500 # number of steps to eq each initial system
 equilibration_sample_interval = 10 # store temp and ekin every 10 eq steps
 equilibration_n_update = 1 # update of neighbour list during eq
 
