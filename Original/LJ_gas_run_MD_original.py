@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-LJ_gas_run_MD.py
+LJ_gas_run_MD_original.py
 
 Main program for running molecular dynamics simulations using Lennard-Jones particles.
 Initializes the system, runs the integrator loop, records energy and trajectory data, 
@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import time
 from datetime import datetime
 
-from LJ_gas import(
+from LJ_gas_original import(
     ParticleSystem,
     SimulationParameters,
     simulate_NVE_step,

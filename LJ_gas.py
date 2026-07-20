@@ -552,6 +552,290 @@ def calculate_force(
 
     return None
 
+def calculate_all_pairs_reference(
+    ps: ParticleSystem,
+    sim: SimulationParameters,
+    apply_cutoff: bool
+):
+    """
+    Calculate an independent all-pairs force reference.
+
+    This function always examines all unique particle pairs. It does
+    not use the stored neighbour list and does not modify ps.force.
+
+    Parameters:
+        ps:
+            Current particle system.
+
+        sim:
+            Current simulation parameters.
+
+        apply_cutoff:
+            If True, only pairs currently inside sim.r_cut are used.
+            This produces a fresh cutoff reference.
+
+            If False, all unique particle pairs are used.
+            This produces the reference without a cutoff.
+
+    Returns:
+        reference_force:
+            Force array with shape (n_particles, 3).
+
+        reference_energy:
+            Potential energy belonging to the reference force.
+
+        active_pairs:
+            Array containing the particle pairs used for the
+            reference calculation.
+    """
+
+    # Start with a separate force array. This is important because
+    # the diagnostic must not overwrite the force used by the MD run.
+    reference_force = np.zeros_like(ps.force)
+
+    # Generate every unique particle pair exactly once.
+    # k=1 excludes the diagonal pairs i == j.
+    i_pairs, j_pairs = np.triu_indices(ps.n, k=1)
+
+    # A system with fewer than two particles has no particle pairs.
+    if i_pairs.size == 0:
+        empty_pairs = np.empty((0, 2), dtype=np.int64)
+
+        return (reference_force, 0.0, empty_pairs)
+
+    # Calculate the distance vectors r_i - r_j for all unique pairs.
+    rij = (ps.position[i_pairs] - ps.position[j_pairs])
+
+    # Apply the minimum-image convention. Each pair interacts through
+    # the closest periodic image.
+    rij -= sim.box_length * np.rint(rij / sim.box_length)
+
+    # Squared distances are sufficient for the LJ force and avoid
+    # unnecessary square-root calculations.
+    r_squared = np.einsum("ij,ij->i",rij,rij)
+
+    if apply_cutoff:
+        # A fresh cutoff reference is based on the current positions,
+        # independently of the stored neighbour list.
+        inside_cutoff = (r_squared <= sim.r_cut * sim.r_cut)
+
+        i_pairs = i_pairs[inside_cutoff]
+        j_pairs = j_pairs[inside_cutoff]
+        rij = rij[inside_cutoff]
+        r_squared = r_squared[inside_cutoff]
+
+    # There may be no pairs inside the selected cutoff.
+    if i_pairs.size == 0:
+        empty_pairs = np.empty((0, 2), dtype=np.int64)
+
+        return (reference_force, 0.0, empty_pairs)
+
+    # Use the same lower distance limit as calculate_force().
+    # This prevents numerical overflow for extremely small distances.
+    minimum_r_squared = max(sim.rij_min * sim.rij_min, 1e-24)
+
+    r_squared = np.maximum(r_squared, minimum_r_squared)
+
+    # The current simulation contains identical argon particles.
+    # Therefore sigma and epsilon are the same for every pair.
+    sigma = ps.sigma[0]
+    epsilon = ps.epsilon[0]
+
+    inverse_r_squared = (1.0 / r_squared)
+
+    sigma_over_r_squared = (sigma * sigma * inverse_r_squared)
+
+    # (sigma/r)^6 and (sigma/r)^12
+    sr6 = sigma_over_r_squared**3
+    sr12 = sr6 * sr6
+
+    # Lennard-Jones force:
+    # F_i = 24 epsilon / r^2 * [2(sigma/r)^12 - (sigma/r)^6] * r_ij
+    force_factor = (24.0 * epsilon * inverse_r_squared * (2.0 * sr12 - sr6))
+
+    pair_force = (force_factor[:, np.newaxis] * rij)
+
+    # Accumulate the pair forces for every Cartesian dimension.
+    # The force on j has the opposite sign to the force on i.
+    for dimension in range(3):
+        force_on_i = np.bincount(i_pairs, weights=pair_force[:, dimension], minlength=ps.n)
+
+        force_on_j = np.bincount(j_pairs, weights=pair_force[:, dimension], minlength=ps.n)
+
+        reference_force[:, dimension] = (force_on_i - force_on_j)
+
+    # Calculate the potential energy from the same active pairs.
+    reference_energy = float(np.sum(4.0 * epsilon * (sr12 - sr6)))
+
+    active_pairs = np.column_stack((i_pairs, j_pairs)).astype(np.int64, copy=False)
+
+    return (reference_force, reference_energy, active_pairs)
+
+
+def neighbour_list_error_metrics(ps: ParticleSystem, sim: SimulationParameters):
+    """
+    Measure neighbour-list and cutoff errors independently.
+
+    Three forces at the exact same particle positions are compared:
+
+        stale force:
+            Force calculated with the currently stored neighbour list.
+
+        fresh cutoff force:
+            Force calculated from all pairs currently inside r_cut.
+
+        full force:
+            Force calculated from all particle pairs without a cutoff.
+
+    calculate_force(ps, sim) must have been called immediately before
+    this function.
+    """
+
+    if not hasattr(ps, "neighbour_pairs"):
+        raise ValueError("neighbour list was not created")
+
+    if not hasattr(ps, "current_potential_energy"):
+        raise ValueError("calculate_force must be called before the error measurement")
+
+    # Copy the production results. The reference calculations below
+    # must not alter the actual MD force.
+    stale_force = ps.force.copy()
+
+    stale_energy = float(ps.current_potential_energy)
+
+    # Reference 1:
+    # all current pairs inside the physical cutoff.
+    fresh_force, fresh_energy, fresh_pairs = (calculate_all_pairs_reference(ps, sim, apply_cutoff=True))
+
+    # Reference 2:
+    # all unique particle pairs without a cutoff.
+    full_force, full_energy, _ = (calculate_all_pairs_reference(ps, sim, apply_cutoff=False))
+
+    # Determine which pairs from the stored neighbour list are
+    # currently inside the physical cutoff and therefore contribute
+    # to calculate_force().
+    stale_pairs = ps.neighbour_pairs
+
+    if stale_pairs.shape[0] > 0:
+        stale_i = stale_pairs[:, 0]
+        stale_j = stale_pairs[:, 1]
+
+        stale_rij = (ps.position[stale_i] - ps.position[stale_j])
+
+        stale_rij -= sim.box_length * np.rint(stale_rij / sim.box_length)
+
+        stale_r_squared = np.einsum("ij,ij->i", stale_rij, stale_rij)
+
+        stale_cutoff_pairs = stale_pairs[stale_r_squared <= sim.r_cut * sim.r_cut]
+
+    else:
+        stale_cutoff_pairs = np.empty((0, 2), dtype=np.int64)
+
+    # Encode a pair (i, j) as one integer i*N + j.
+    # This allows a fast, vectorized comparison of pair lists.
+    fresh_pair_ids = (fresh_pairs[:, 0] * ps.n + fresh_pairs[:, 1])
+
+    stale_pair_ids = (stale_cutoff_pairs[:, 0] * ps.n + stale_cutoff_pairs[:, 1])
+
+    # These pairs are currently inside r_cut but are absent from the
+    # reused neighbour list. They are the actual stale-list error.
+    missing_pair_ids = np.setdiff1d(
+        fresh_pair_ids,
+        stale_pair_ids,
+        assume_unique=False
+    )
+
+    def relative_l2_error(value, reference):
+        """
+        Calculate ||value-reference|| / ||reference||.
+
+        If the reference force is zero, a relative error is undefined.
+        np.nan prevents a force-free system from being interpreted as
+        a perfectly accurate simulation.
+        """
+
+        reference_norm = np.linalg.norm(reference)
+
+        if reference_norm == 0.0:
+            return np.nan
+
+        difference_norm = np.linalg.norm(value - reference)
+
+        return float(difference_norm / reference_norm)
+
+    n_fresh_pairs = int(fresh_pairs.shape[0])
+
+    n_stale_pairs = int(stale_cutoff_pairs.shape[0])
+
+    n_missing_pairs = int(missing_pair_ids.size)
+
+    if n_fresh_pairs > 0:
+        missed_pair_fraction = (n_missing_pairs / n_fresh_pairs)
+    else:
+        missed_pair_fraction = 0.0
+
+    return {
+        # Error caused only by reusing an old neighbour list.
+        "list_force_relative_l2": (
+            relative_l2_error(
+                stale_force,
+                fresh_force
+            )
+        ),
+
+        # Error caused only by truncating interactions at r_cut.
+        "cutoff_force_relative_l2": (
+            relative_l2_error(
+                fresh_force,
+                full_force
+            )
+        ),
+
+        # Combined error of cutoff and reused neighbour list.
+        "total_force_relative_l2": (
+            relative_l2_error(
+                stale_force,
+                full_force
+            )
+        ),
+
+        # Absolute potential-energy error caused by list reuse.
+        "list_energy_absolute_error_kJ_mol": abs(
+            stale_energy - fresh_energy
+        ),
+
+        # Absolute potential-energy error caused by the cutoff.
+        "cutoff_energy_absolute_error_kJ_mol": abs(
+            fresh_energy - full_energy
+        ),
+
+        # Number of interactions that should currently be calculated.
+        "n_fresh_cutoff_pairs": (
+            n_fresh_pairs
+        ),
+
+        # Number of currently active interactions available in the
+        # stored neighbour list.
+        "n_stale_cutoff_pairs": (
+            n_stale_pairs
+        ),
+
+        # Number of interactions missed by the reused list.
+        "n_missing_pairs": (
+            n_missing_pairs
+        ),
+
+        # Fraction of required interactions that were missed.
+        "missed_pair_fraction": float(
+            missed_pair_fraction
+        ),
+
+        # Explicit check that the state contains interactions.
+        "has_cutoff_interactions": (
+            n_fresh_pairs > 0
+        )
+    }
+
 def A_step(
     ps: ParticleSystem,
     sim: SimulationParameters,
