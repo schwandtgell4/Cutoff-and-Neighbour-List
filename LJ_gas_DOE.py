@@ -32,14 +32,14 @@ box_length_start = 100
 tau_thermostat = 1
 rij_min = 1e-2
 
-n_equil_steps = 20000 # number of steps to eq each initial system
+n_equil_steps = 500 # number of steps to eq each initial system
 equilibration_sample_interval = 10  # store temp and ekin every 10 eq steps
 equilibration_n_update = 1 # update of neighbour list during eq
 
 n_update_werte = list(range(1, 11))
 cutoff_faktoren = [1, 2, 2.5, 3, 5, 7.5, 10, 15, 20]
 dichte_faktoren = [0.5, 1.0, 1.5]
-seeds = [1, 2, 3, 4, 5]
+seeds = [1, 2, 3]
 equilibration_cutoff_factor = max(cutoff_faktoren) # use largest cutoff during equilibration
 
 ordner = "doe_ergebnisse"
