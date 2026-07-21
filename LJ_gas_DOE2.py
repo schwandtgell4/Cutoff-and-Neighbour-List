@@ -6,6 +6,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
+from mpl_toolkits.mplot3d import proj3d
 import numpy as np
 import pandas as pd
 from scipy.constants import R
@@ -15,8 +18,8 @@ from LJ_gas import (
     SimulationParameters,
     calculate_all_pairs_reference,
     calculate_force,
-    initialize_positions,
     initialize_velocities,
+    instantaneous_temperature,
     simulate_NVT_step,
     update_neighbour_list,
 )
@@ -30,19 +33,21 @@ mass_argon = 39.95                 # u = 1e-3 kg/mol
 sigma_argon = 0.34                 # nm
 epsilon_argon = 120.0 * R * 1e-3  # kJ/mol
 
-dt = 0.1                           # ps
+dt = 0.01                          # ps
 temperature = 300.0                # K
-box_length = 100.0                 # nm
+box_length = 20.0                  # nm
 tau_thermostat = 1.0               # ps
 rij_min = 1e-2                     # nm
+minimum_initial_distance = 1.0 * sigma_argon
+maximum_position_attempts = 10_000
 
 n_equil_steps = 500
 n_timing_steps = 100
 timing_repeats = 3
 error_cycles = 3
 
-n_update_values = list(range(9, 15))
-cutoff_factors = [1, 2, 2.5, 3, 5, 7.5, 10, 11, 12, 13, 14, 15]
+n_update_values = list(range(1, 50))
+cutoff_factors = [1, 2, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3]
 seeds = [1, 2, 3]
 
 MAX_TOTAL_FORCE_ERROR = 1e-2
@@ -50,6 +55,18 @@ MAX_TOTAL_FORCE_ERROR = 1e-2
 base_directory = Path(__file__).resolve().parent
 original_core_path = base_directory / "Original" / "LJ_gas_original.py"
 output_directory = base_directory / "doe2_ergebnisse"
+
+
+def save_csv(table, filename):
+    """Save one Excel-friendly CSV using German number formatting."""
+
+    table.to_csv(
+        output_directory / filename,
+        index=False,
+        sep=";",
+        decimal=",",
+        encoding="utf-8-sig",
+    )
 
 
 def load_original_core():
@@ -87,6 +104,64 @@ def make_simulation(r_cut, n_steps):
     )
 
 
+def initialize_safe_positions(ps, box_length):
+    """Place particles randomly without unphysical LJ overlaps."""
+
+    positions = np.empty((ps.n, 3), dtype=float)
+    minimum_distance_squared = minimum_initial_distance**2
+
+    for particle_index in range(ps.n):
+        for _ in range(maximum_position_attempts):
+            candidate = np.random.uniform(0.0, box_length, size=3)
+
+            if particle_index == 0:
+                positions[particle_index] = candidate
+                break
+
+            displacement = positions[:particle_index] - candidate
+            displacement -= box_length * np.rint(
+                displacement / box_length
+            )
+            distance_squared = np.einsum(
+                "ij,ij->i",
+                displacement,
+                displacement,
+            )
+
+            if np.all(distance_squared >= minimum_distance_squared):
+                positions[particle_index] = candidate
+                break
+        else:
+            raise RuntimeError(
+                "Could not generate non-overlapping initial positions. "
+                "Increase the box length or reduce the minimum distance."
+            )
+
+    ps.position[:] = positions
+
+
+def validate_state(ps, context, check_temperature=False):
+    """Stop immediately if a simulation state becomes unstable."""
+
+    for name in ("position", "velocity", "force"):
+        if not np.all(np.isfinite(getattr(ps, name))):
+            raise FloatingPointError(
+                f"Non-finite {name} values during {context}"
+            )
+
+    if check_temperature:
+        current_temperature = instantaneous_temperature(ps)
+
+        if (
+            not np.isfinite(current_temperature)
+            or current_temperature > 10.0 * temperature
+        ):
+            raise FloatingPointError(
+                f"Unstable temperature during {context}: "
+                f"{current_temperature:.3e} K"
+            )
+
+
 def make_system(state, sim, n_update):
     """Create a fresh optimized system from a stored equilibrium state."""
 
@@ -116,13 +191,23 @@ def create_equilibrium_states():
         ps.mass[:] = mass_argon
         ps.sigma[:] = sigma_argon
         ps.epsilon[:] = epsilon_argon
-        initialize_positions(ps, sim.box_length)
+        initialize_safe_positions(ps, sim.box_length)
         initialize_velocities(ps, sim.temperature)
         update_neighbour_list(ps, sim, step=0, n_update=1)
         calculate_force(ps, sim)
+        validate_state(
+            ps,
+            f"initialization for seed {seed}",
+            check_temperature=True,
+        )
 
         for step in range(1, n_equil_steps + 1):
             simulate_NVT_step(ps, sim, step, n_update=1)
+            validate_state(
+                ps,
+                f"equilibration for seed {seed}, step {step}",
+                check_temperature=True,
+            )
 
         states[seed] = {
             "position": ps.position.copy(),
@@ -161,7 +246,9 @@ def median_original_runtime(original_core, state, production_seed):
         for _ in range(n_timing_steps):
             original_core.simulate_NVT_step(ps, sim)
 
-        runtimes.append(time.perf_counter() - start)
+        runtime = time.perf_counter() - start
+        validate_state(ps, "original-code timing")
+        runtimes.append(runtime)
 
     return float(np.median(runtimes))
 
@@ -180,7 +267,9 @@ def median_optimized_runtime(state, r_cut, n_update, production_seed):
         for step in range(1, n_timing_steps + 1):
             simulate_NVT_step(ps, sim, step, n_update)
 
-        runtimes.append(time.perf_counter() - start)
+        runtime = time.perf_counter() - start
+        validate_state(ps, "optimized-code timing")
+        runtimes.append(runtime)
 
     return float(np.median(runtimes))
 
@@ -718,8 +807,22 @@ def save_performance_landscape(
 ):
     """Save a 3D response surface for speedup and total force error."""
 
-    speedup_matrix = pivot_summary(summary, "speedup_median")
-    error_matrix = pivot_summary(summary, "total_error_max")
+    speedup_matrix = (
+        pivot_summary(summary, "speedup_median")
+        .dropna(axis=0, how="all")
+        .dropna(axis=1, how="all")
+    )
+
+    if speedup_matrix.empty:
+        raise ValueError("no finite DOE values for the 3D landscape")
+
+    error_matrix = pivot_summary(
+        summary,
+        "total_error_max",
+    ).reindex(
+        index=speedup_matrix.index,
+        columns=speedup_matrix.columns,
+    )
     speedup = speedup_matrix.to_numpy(dtype=float)
     total_error_percent = (
         error_matrix.to_numpy(dtype=float) * 100.0
@@ -771,9 +874,17 @@ def save_performance_landscape(
         depthshade=False,
     )
 
+    x_end = float(np.max(cutoff_grid)) * 1.03
+    y_end = float(np.max(update_grid)) * 1.03
+    z_end = 1.1
+    if valid.any():
+        finite_speedup = speedup[valid]
+        upper = max(1.0, float(np.max(finite_speedup)))
+        z_end = upper * 1.06
+
     cutoff_plane, update_plane = np.meshgrid(
-        [float(np.min(cutoff_grid)), float(np.max(cutoff_grid))],
-        [float(np.min(update_grid)), float(np.max(update_grid))],
+        [0.0, x_end],
+        [0.0, y_end],
         indexing="ij",
     )
     axis.plot_surface(
@@ -786,26 +897,94 @@ def save_performance_landscape(
         shade=False,
     )
 
-    if valid.any():
-        finite_speedup = speedup[valid]
-        lower = min(1.0, float(np.min(finite_speedup)))
-        upper = max(1.0, float(np.max(finite_speedup)))
-        span = max(upper - lower, 0.1)
-        axis.set_zlim(
-            max(0.0, lower - 0.08 * span),
-            upper + 0.08 * span,
+    # Draw three explicit axes from one visible coordinate origin.
+    axis.plot(
+        [0.0, x_end],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        color="#333333",
+        linewidth=1.3,
+    )
+    axis.plot(
+        [0.0, 0.0],
+        [0.0, y_end],
+        [0.0, 0.0],
+        color="#333333",
+        linewidth=1.3,
+    )
+    axis.plot(
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, z_end],
+        color="#333333",
+        linewidth=1.3,
+    )
+    axis.scatter(
+        [0.0],
+        [0.0],
+        [0.0],
+        color="#333333",
+        s=18,
+        depthshade=False,
+    )
+
+    def sparse_ticks(values, maximum_count=7):
+        values = np.asarray(values, dtype=float)
+
+        if values.size <= maximum_count:
+            return values
+
+        indices = np.unique(
+            np.linspace(
+                0,
+                values.size - 1,
+                maximum_count,
+            ).astype(int)
         )
+        return values[indices]
 
     axis.set_xlabel(r"Cutoff factor $r_\mathrm{cut}/\sigma$", labelpad=10)
     axis.set_ylabel(
         r"Update interval $n_\mathrm{update}$",
         labelpad=10,
     )
-    axis.set_zlabel("Median speedup vs original", labelpad=10)
-    axis.set_xticks([1, 2.5, 5, 7.5, 10, 12, 15])
-    axis.set_yticks(n_update_values)
-    axis.set_box_aspect((1.45, 1.0, 0.82))
-    axis.view_init(elev=27, azim=-135)
+    z_axis_label = (
+        r"Median speedup $S=t_\mathrm{orig}/t_\mathrm{opt}$ [$\times$]"
+    )
+    axis.set_xlim(0.0, x_end)
+    axis.set_ylim(0.0, y_end)
+    axis.set_zlim(0.0, z_end)
+    axis.set_xticks(
+        np.concatenate(
+            ([0.0], sparse_ticks(speedup_matrix.index))
+        )
+    )
+    axis.set_yticks(
+        np.concatenate(
+            ([0.0], sparse_ticks(speedup_matrix.columns))
+        )
+    )
+    axis.zaxis.set_major_locator(MaxNLocator(nbins=6))
+    # Exact isometric projection: the visible coordinate axes have equal
+    # lengths, and the common origin with the vertical z-axis is on the left.
+    axis.set_box_aspect((1.0, 1.0, 1.0))
+    axis.set_proj_type("ortho")
+    axis.view_init(
+        elev=np.degrees(np.arctan(1.0 / np.sqrt(2.0))),
+        azim=-45,
+    )
+
+    # Hide Matplotlib's native z-axis. Its automatic position is a rear edge
+    # that does not pass through the common origin used by the explicit axes.
+    axis.zaxis._axinfo["juggled"] = (0, 1, 2)
+    axis.zaxis.line.set_visible(False)
+    axis.zaxis.label.set_visible(False)
+    axis.tick_params(
+        axis="z",
+        which="both",
+        color=(0.0, 0.0, 0.0, 0.0),
+        labelcolor=(0.0, 0.0, 0.0, 0.0),
+    )
     axis.set_title(
         "Performance landscape: height = speedup, colour = total force error",
         pad=20,
@@ -844,6 +1023,84 @@ def save_performance_landscape(
         right=0.90,
         bottom=0.11,
         top=0.91,
+    )
+
+    # Project custom z-ticks onto the visible line (0, 0, z). This makes the
+    # three labelled axes meet at exactly the same point without changing the
+    # selected viewing angle.
+    fig.canvas.draw()
+
+    def project_to_axis_coordinates(x_value, y_value, z_value):
+        x_projected, y_projected, _ = proj3d.proj_transform(
+            x_value,
+            y_value,
+            z_value,
+            axis.get_proj(),
+        )
+        display_coordinates = axis.transData.transform(
+            (x_projected, y_projected)
+        )
+        return axis.transAxes.inverted().transform(display_coordinates)
+
+    projected_origin = project_to_axis_coordinates(0.0, 0.0, 0.0)
+    projected_top = project_to_axis_coordinates(0.0, 0.0, z_end)
+    projected_direction = projected_top - projected_origin
+    direction_norm = np.linalg.norm(projected_direction)
+    outward_normal = np.array(
+        [-projected_direction[1], projected_direction[0]]
+    ) / direction_norm
+
+    for z_tick in axis.get_zticks():
+        if z_tick < 0.0 or z_tick > z_end:
+            continue
+
+        projected_tick = project_to_axis_coordinates(
+            0.0,
+            0.0,
+            float(z_tick),
+        )
+        tick_start = projected_tick - 0.007 * outward_normal
+        tick_end = projected_tick + 0.007 * outward_normal
+        axis.add_line(
+            Line2D(
+                [tick_start[0], tick_end[0]],
+                [tick_start[1], tick_end[1]],
+                transform=axis.transAxes,
+                color="#333333",
+                linewidth=0.9,
+                clip_on=False,
+            )
+        )
+        label_position = projected_tick + 0.018 * outward_normal
+        axis.text2D(
+            label_position[0],
+            label_position[1],
+            f"{z_tick:g}",
+            transform=axis.transAxes,
+            ha="right",
+            va="center",
+            fontsize=9,
+            clip_on=False,
+        )
+
+    label_position = (
+        0.5 * (projected_origin + projected_top)
+        + 0.075 * outward_normal
+    )
+    label_rotation = np.degrees(
+        np.arctan2(projected_direction[1], projected_direction[0])
+    )
+    axis.text2D(
+        label_position[0],
+        label_position[1],
+        z_axis_label,
+        transform=axis.transAxes,
+        ha="center",
+        va="center",
+        rotation=label_rotation,
+        rotation_mode="anchor",
+        fontsize=10,
+        clip_on=False,
     )
     fig.savefig(
         output_directory / "performance_landscape_3d.png",
@@ -919,7 +1176,7 @@ def main():
         )
 
         results = pd.DataFrame(rows)
-        results.to_csv(output_directory / "doe_rohdaten.csv", index=False)
+        save_csv(results, "doe_rohdaten.csv")
         print(
             f"{run_number}/{len(combinations)}, "
             f"n_update={n_update}, cutoff={cutoff_factor:g}, "
@@ -931,8 +1188,8 @@ def main():
 
     results = pd.DataFrame(rows)
     summary, optimum = create_summary(results)
-    summary.to_csv(output_directory / "doe_mittelwerte.csv", index=False)
-    optimum.to_csv(output_directory / "optimum.csv", index=False)
+    save_csv(summary, "doe_mittelwerte.csv")
+    save_csv(optimum, "optimum.csv")
 
     seed_text = ", ".join(str(seed) for seed in seeds)
     system_caption = (
@@ -972,6 +1229,8 @@ def main():
         caption=(
             system_caption
             + " Old list compared with a fresh list at identical positions."
+            + f" Maximum across seeds and {error_cycles} oldest-list"
+            + " samples per run."
             + " Grey cells indicate an undefined relative error."
         ),
     )
