@@ -523,6 +523,36 @@ def pivot_summary(summary, column):
     )
 
 
+def update_tick_positions(columns, step=5, maximum_count=15):
+    """Return readable heatmap tick positions without dropping DOE cells."""
+
+    values = np.asarray(columns)
+
+    if values.size <= maximum_count:
+        return np.arange(values.size, dtype=int)
+
+    numeric_values = values.astype(float)
+    rounded_values = np.rint(numeric_values).astype(int)
+    integer_values = np.isclose(numeric_values, rounded_values)
+
+    if integer_values.all():
+        selected = (
+            (rounded_values == rounded_values[0])
+            | (rounded_values == rounded_values[-1])
+            | (rounded_values % step == 0)
+        )
+        return np.flatnonzero(selected)
+
+    indices = np.unique(
+        np.linspace(
+            0,
+            values.size - 1,
+            maximum_count,
+        ).astype(int)
+    )
+    return indices
+
+
 def save_heatmap(
     summary,
     column,
@@ -538,7 +568,17 @@ def save_heatmap(
 
     matrix = pivot_summary(summary, column)
     values = matrix.to_numpy(dtype=float) * value_scale
-    fig, axis = plt.subplots(figsize=(10, 7.5))
+    figure_width = max(
+        12.0,
+        min(17.0, 0.30 * len(matrix.columns) + 3.0),
+    )
+    figure_height = max(
+        7.5,
+        min(9.0, 0.45 * len(matrix.index) + 3.0),
+    )
+    fig, axis = plt.subplots(
+        figsize=(figure_width, figure_height)
+    )
     image = None
     colour_map = plt.get_cmap(
         "magma" if logarithmic else "viridis"
@@ -599,8 +639,14 @@ def save_heatmap(
         )
         colour_bar.set_label(colorbar_label)
 
-    axis.set_xticks(range(len(matrix.columns)))
-    axis.set_xticklabels(matrix.columns)
+    x_tick_positions = update_tick_positions(matrix.columns)
+    axis.set_xticks(x_tick_positions)
+    axis.set_xticklabels(
+        [
+            f"{matrix.columns[position]:g}"
+            for position in x_tick_positions
+        ]
+    )
     axis.set_yticks(range(len(matrix.index)))
     axis.set_yticklabels([f"{value:g}" for value in matrix.index])
 
@@ -617,13 +663,16 @@ def save_heatmap(
     axis.grid(
         which="minor",
         color="white",
-        linewidth=0.6,
+        linewidth=0.35,
+        alpha=0.60,
     )
     axis.tick_params(
         which="minor",
         bottom=False,
         left=False,
     )
+    axis.tick_params(axis="x", labelsize=9, pad=3)
+    axis.tick_params(axis="y", labelsize=9)
     axis.set_xlabel(
         r"Neighbour-list update interval $n_\mathrm{update}$"
     )
@@ -668,9 +717,12 @@ def shared_error_plot_limits(summary):
     if finite_positive.size == 0:
         maximum = minimum * 10.0
     else:
-        maximum = max(
+        required_maximum = max(
             float(np.max(finite_positive)),
             MAX_TOTAL_FORCE_ERROR * 100.0 * 10.0,
+        )
+        maximum = 10.0 ** np.ceil(
+            np.log10(required_maximum) - 1e-12
         )
 
     return minimum, maximum
@@ -701,10 +753,14 @@ def save_error_comparison(
     colour_map = plt.get_cmap("magma").copy()
     colour_map.set_bad("#d9d9d9")
     norm = LogNorm(vmin=minimum, vmax=maximum)
+    figure_width = max(
+        20.0,
+        min(24.0, 16.0 + 0.15 * len(n_update_values)),
+    )
     fig, axes = plt.subplots(
         1,
         len(panels),
-        figsize=(18, 7),
+        figsize=(figure_width, 8.5),
         sharex=True,
         sharey=True,
     )
@@ -727,8 +783,14 @@ def save_error_comparison(
             norm=norm,
         )
 
-        axis.set_xticks(range(len(matrix.columns)))
-        axis.set_xticklabels(matrix.columns)
+        x_tick_positions = update_tick_positions(matrix.columns)
+        axis.set_xticks(x_tick_positions)
+        axis.set_xticklabels(
+            [
+                f"{matrix.columns[position]:g}"
+                for position in x_tick_positions
+            ]
+        )
         axis.set_yticks(range(len(matrix.index)))
         axis.set_yticklabels(
             [f"{value:g}" for value in matrix.index]
@@ -744,13 +806,16 @@ def save_error_comparison(
         axis.grid(
             which="minor",
             color="white",
-            linewidth=0.5,
+            linewidth=0.30,
+            alpha=0.55,
         )
         axis.tick_params(
             which="minor",
             bottom=False,
             left=False,
         )
+        axis.tick_params(axis="x", labelsize=8, pad=2)
+        axis.tick_params(axis="y", labelsize=9)
         axis.set_xlabel(r"Update interval $n_\mathrm{update}$")
         axis.set_title(panel_title, pad=10)
 
@@ -765,7 +830,7 @@ def save_error_comparison(
         0.035,
         (
             system_caption
-            + " Maximum across seeds and sampled list ages."
+            + "\nMaximum across seeds and sampled list ages."
             + " Grey cells are undefined; zero errors use the lower colour limit."
             + " Total vector error is not the arithmetic sum of the components."
         ),
@@ -777,14 +842,14 @@ def save_error_comparison(
     fig.subplots_adjust(
         left=0.065,
         right=0.88,
-        bottom=0.15,
+        bottom=0.17,
         top=0.88,
         wspace=0.10,
     )
 
     if image is not None:
         colour_bar_axis = fig.add_axes(
-            [0.90, 0.15, 0.014, 0.73]
+            [0.90, 0.17, 0.014, 0.71]
         )
         colour_bar = fig.colorbar(
             image,
@@ -847,7 +912,7 @@ def save_performance_landscape(
     surface_colours = colour_map(error_norm(plotted_error))
     valid = np.isfinite(speedup) & np.isfinite(total_error_percent)
 
-    fig = plt.figure(figsize=(12, 8))
+    fig = plt.figure(figsize=(14.5, 8.5))
     axis = fig.add_subplot(111, projection="3d")
 
     axis.plot_surface(
@@ -856,7 +921,7 @@ def save_performance_landscape(
         np.ma.masked_invalid(speedup),
         facecolors=surface_colours,
         edgecolor="#666666",
-        linewidth=0.35,
+        linewidth=0.45,
         antialiased=True,
         shade=False,
         alpha=0.92,
@@ -868,14 +933,17 @@ def save_performance_landscape(
         c=plotted_error[valid],
         cmap=colour_map,
         norm=error_norm,
-        s=13,
+        s=10,
         edgecolors="black",
         linewidths=0.25,
         depthshade=False,
     )
 
-    x_end = float(np.max(cutoff_grid)) * 1.03
-    y_end = float(np.max(update_grid)) * 1.03
+    x_start = float(np.min(cutoff_grid))
+    x_end = float(np.max(cutoff_grid))
+    y_start = float(np.min(update_grid))
+    y_end = float(np.max(update_grid))
+    z_start = 1.0
     z_end = 1.1
     if valid.any():
         finite_speedup = speedup[valid]
@@ -883,8 +951,8 @@ def save_performance_landscape(
         z_end = upper * 1.06
 
     cutoff_plane, update_plane = np.meshgrid(
-        [0.0, x_end],
-        [0.0, y_end],
+        [x_start, x_end],
+        [y_start, y_end],
         indexing="ij",
     )
     axis.plot_surface(
@@ -892,42 +960,34 @@ def save_performance_landscape(
         update_plane,
         np.ones_like(cutoff_plane),
         color="#777777",
-        alpha=0.20,
+        alpha=0.12,
         linewidth=0.0,
         shade=False,
     )
 
-    # Draw three explicit axes from one visible coordinate origin.
+    # Draw three explicit axes from the lowest tested parameter corner.
+    # The factor axes therefore do not imply untested zero values.
     axis.plot(
-        [0.0, x_end],
-        [0.0, 0.0],
-        [0.0, 0.0],
+        [x_start, x_end],
+        [y_start, y_start],
+        [z_start, z_start],
         color="#333333",
         linewidth=1.3,
     )
     axis.plot(
-        [0.0, 0.0],
-        [0.0, y_end],
-        [0.0, 0.0],
+        [x_start, x_start],
+        [y_start, y_end],
+        [z_start, z_start],
         color="#333333",
         linewidth=1.3,
     )
     axis.plot(
-        [0.0, 0.0],
-        [0.0, 0.0],
-        [0.0, z_end],
+        [x_start, x_start],
+        [y_start, y_start],
+        [z_start, z_end],
         color="#333333",
         linewidth=1.3,
     )
-    axis.scatter(
-        [0.0],
-        [0.0],
-        [0.0],
-        color="#333333",
-        s=18,
-        depthshade=False,
-    )
-
     def sparse_ticks(values, maximum_count=7):
         values = np.asarray(values, dtype=float)
 
@@ -951,28 +1011,38 @@ def save_performance_landscape(
     z_axis_label = (
         r"Median speedup $S=t_\mathrm{orig}/t_\mathrm{opt}$ [$\times$]"
     )
-    axis.set_xlim(0.0, x_end)
-    axis.set_ylim(0.0, y_end)
-    axis.set_zlim(0.0, z_end)
-    axis.set_xticks(
-        np.concatenate(
-            ([0.0], sparse_ticks(speedup_matrix.index))
-        )
+    axis.set_xlim(x_start, x_end)
+    axis.set_ylim(y_start, y_end)
+    axis.set_zlim(z_start, z_end)
+    axis.set_xticks(sparse_ticks(speedup_matrix.index, maximum_count=6))
+    axis.set_yticks(sparse_ticks(speedup_matrix.columns, maximum_count=7))
+    z_locator = MaxNLocator(nbins=5)
+    z_ticks = z_locator.tick_values(z_start, z_end)
+    z_ticks = z_ticks[(z_ticks > z_start) & (z_ticks <= z_end)]
+    axis.set_zticks(
+        np.unique(np.concatenate(([z_start], z_ticks)))
     )
-    axis.set_yticks(
-        np.concatenate(
-            ([0.0], sparse_ticks(speedup_matrix.columns))
-        )
-    )
-    axis.zaxis.set_major_locator(MaxNLocator(nbins=6))
-    # Exact isometric projection: the visible coordinate axes have equal
-    # lengths, and the common origin with the vertical z-axis is on the left.
-    axis.set_box_aspect((1.0, 1.0, 1.0))
+    axis.tick_params(axis="x", labelsize=8, pad=1)
+    axis.tick_params(axis="y", labelsize=8, pad=8)
+
+    # A wider base and a slightly shorter height keep all three axes legible.
+    # Equal data-unit scaling would be meaningless because the axes use
+    # different quantities and numerical ranges.
+    axis.set_box_aspect((1.15, 1.55, 0.85))
     axis.set_proj_type("ortho")
     axis.view_init(
-        elev=np.degrees(np.arctan(1.0 / np.sqrt(2.0))),
-        azim=-45,
+        elev=25,
+        azim=-55,
     )
+
+    # Keep the native three-dimensional grid as a restrained spatial guide.
+    axis.grid(True)
+    for current_axis in (axis.xaxis, axis.yaxis, axis.zaxis):
+        current_axis._axinfo["grid"].update(
+            color=(0.35, 0.35, 0.35, 0.28),
+            linewidth=0.55,
+            linestyle=":",
+        )
 
     # Hide Matplotlib's native z-axis. Its automatic position is a rear edge
     # that does not pass through the common origin used by the explicit axes.
@@ -998,8 +1068,9 @@ def save_performance_landscape(
     colour_bar = fig.colorbar(
         colour_mappable,
         ax=axis,
-        pad=0.10,
-        shrink=0.68,
+        pad=0.055,
+        shrink=0.72,
+        aspect=22,
     )
     colour_bar.set_label("Maximum total relative force error [%]")
 
@@ -1008,6 +1079,7 @@ def save_performance_landscape(
         0.025,
         (
             system_caption
+            + "\n"
             + " Black-edged dots are measured DOE combinations;"
             + " the surface only connects these grid points."
             + " The translucent plane is the unchanged original code"
@@ -1025,9 +1097,8 @@ def save_performance_landscape(
         top=0.91,
     )
 
-    # Project custom z-ticks onto the visible line (0, 0, z). This makes the
-    # three labelled axes meet at exactly the same point without changing the
-    # selected viewing angle.
+    # Project custom z-ticks onto the visible line through the lowest tested
+    # cutoff and update values. All three labelled axes meet at that corner.
     fig.canvas.draw()
 
     def project_to_axis_coordinates(x_value, y_value, z_value):
@@ -1042,8 +1113,16 @@ def save_performance_landscape(
         )
         return axis.transAxes.inverted().transform(display_coordinates)
 
-    projected_origin = project_to_axis_coordinates(0.0, 0.0, 0.0)
-    projected_top = project_to_axis_coordinates(0.0, 0.0, z_end)
+    projected_origin = project_to_axis_coordinates(
+        x_start,
+        y_start,
+        z_start,
+    )
+    projected_top = project_to_axis_coordinates(
+        x_start,
+        y_start,
+        z_end,
+    )
     projected_direction = projected_top - projected_origin
     direction_norm = np.linalg.norm(projected_direction)
     outward_normal = np.array(
@@ -1051,12 +1130,12 @@ def save_performance_landscape(
     ) / direction_norm
 
     for z_tick in axis.get_zticks():
-        if z_tick < 0.0 or z_tick > z_end:
+        if z_tick < z_start or z_tick > z_end:
             continue
 
         projected_tick = project_to_axis_coordinates(
-            0.0,
-            0.0,
+            x_start,
+            y_start,
             float(z_tick),
         )
         tick_start = projected_tick - 0.007 * outward_normal
@@ -1079,13 +1158,13 @@ def save_performance_landscape(
             transform=axis.transAxes,
             ha="right",
             va="center",
-            fontsize=9,
+            fontsize=8,
             clip_on=False,
         )
 
     label_position = (
         0.5 * (projected_origin + projected_top)
-        + 0.075 * outward_normal
+        + 0.065 * outward_normal
     )
     label_rotation = np.degrees(
         np.arctan2(projected_direction[1], projected_direction[0])
@@ -1099,7 +1178,7 @@ def save_performance_landscape(
         va="center",
         rotation=label_rotation,
         rotation_mode="anchor",
-        fontsize=10,
+        fontsize=9,
         clip_on=False,
     )
     fig.savefig(
