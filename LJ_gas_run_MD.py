@@ -1,444 +1,444 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-LJ_gas_run_MD.py
+"""Run one presentation case of the Lennard-Jones MD simulation.
 
-Main program for running molecular dynamics simulations using Lennard-Jones particles.
-Initializes the system, runs the integrator loop, records energy and trajectory data, 
-and visualizes results.
-
-Author: Bettina Keller
-Created: May 28, 2025
-
-This script imports all classes and functions from md_simulation.py and controls
-the simulation workflow.
-
+Change only ``scenario_name`` and run the file once for each of the three
+cases.  The script saves the normal energy/temperature histories plus the
+total force and potential-energy errors against a full all-pairs reference.
 """
 
-#----------------------------------------------------------------
-#   I M P O R T S
-#----------------------------------------------------------------
+import csv
+import time
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.constants import R
-import matplotlib.pyplot as plt
-
-import time
-from datetime import datetime
 
 from LJ_gas import (
     ParticleSystem,
     SimulationParameters,
-    simulate_NVE_step,
-    simulate_NVT_step,
-    initialize_positions,
-    initialize_velocities,
+    calculate_all_pairs_reference,
     calculate_force,
-    update_neighbour_list,
-    density,
-    write_xyz_trajectory,
-    potential_energy,
-    kinetic_energy,
+    initialize_velocities,
     instantaneous_temperature,
-    ideal_gas_pressure,
-    cutoff_pair_statistics
+    kinetic_energy,
+    potential_energy,
+    simulate_NVT_step,
+    update_neighbour_list,
 )
 
-#----------------------------------------------------------------
-#   F U N C T I O N S
-#----------------------------------------------------------------
-# Define tic and toc functions
-def tic():
-    """Start a timer."""
-    global _tic_time
-    _tic_time = time.time()
 
-def toc():
-    """Stop the timer and return the elapsed time in seconds."""
+# ---------------------------------------------------------------------------
+# Select one case and run the file three times
+# ---------------------------------------------------------------------------
+scenario_name = "fast_inaccurate"
 
-    elapsed_time = None
-    
-    if '_tic_time' in globals():
-        elapsed_time = time.time() - _tic_time
-    
-    else:
-        print("Error: tic() was not called before toc()")
-    
-    return elapsed_time
+scenarios = {
+    "accurate": {
+        "label": "Accurate control",
+        "r_cut_factor": 3.0,
+        "n_update": 1,
+    },
+    "optimal": {
+        "label": "Selected DOE candidate",
+        "r_cut_factor": 2.4,
+        "n_update": 35,
+    },
+    "fast_inaccurate": {
+        "label": "Fast, inaccurate control",
+        "r_cut_factor": 1.0,
+        "n_update": 49,
+    },
+}
 
-def save_plot(
-    x,
-    y,
-    filename,
-    xlabel,
-    ylabel,
-    y_margin
-):
-    """Save one plot without opening a blocking window."""
+if scenario_name not in scenarios:
+    raise ValueError("Choose accurate, optimal or fast_inaccurate")
 
-    y_mean = np.mean(y)
+scenario = scenarios[scenario_name]
 
-    plt.figure(figsize=(8, 6))
-    plt.plot(x, y)
 
-    plt.ylim(
-        y_mean - y_margin,
-        y_mean + y_margin
-    )
-
-    plt.xlabel(
-        xlabel,
-        fontsize=14
-    )
-
-    plt.ylabel(
-        ylabel,
-        fontsize=14
-    )
-
-    plt.savefig(
-        filename,
-        dpi=300,
-        bbox_inches="tight"
-    )
-
-    # Close the figure instead of opening it with plt.show().
-    plt.close()
-
-#----------------------------------------------------------------
-#   P A R A M E T E R S
-#----------------------------------------------------------------
-# system
+# ---------------------------------------------------------------------------
+# Common parameters: identical to the final DOE2 experiment
+# ---------------------------------------------------------------------------
 n_particles = 2000
-mass_argon =  39.95             # mass in u = 1e-3 kg/mol
-sigma_argon = 0.34              # sigma in nm     Argon: 0.34
-epsilon_argon = 120*R*1e-3      # epsilon in kJ/mol Argon: 120
+mass_argon = 39.95                 # u = g/mol
+sigma_argon = 0.34                 # nm
+epsilon_argon = 120.0 * R * 1e-3  # kJ/mol
 
-# simulation
-dt = 0.1             # ps
-n_steps = 1000 
-temperature = 300     # K
-box_length = 100      # nm
-tau_thermostat = 1  # thermostat coupling constant in 1/ps
-rij_min = 1e-2      # nm
-NVT = True          # switch to decide between NVT and NVE
-n_update = 10       # define how often list is updatet
-r_cut_factor = 20.5
-r_cut = r_cut_factor * sigma_argon   # cutoff radius in nm
+dt = 0.01                          # ps
+n_steps = 10000                     # 100 ps
+temperature = 300.0                # K
+box_length = 20.0                  # nm
+tau_thermostat = 1.0               # ps
+rij_min = 1e-2                     # nm
 
-# output
-file_name_base = "my_simulation"  # file name for all output files
-simulation_only = False
+initial_seed = 1
+production_seed = 100001
+n_equil_steps = 500
+diagnostic_interval = 20           # full reference every 0.2 ps
 
-#----------------------------------------------------------------
-#   P R O G R A M
-#----------------------------------------------------------------
+r_cut_factor = scenario["r_cut_factor"]
+n_update = scenario["n_update"]
+r_cut = r_cut_factor * sigma_argon
+
+output_directory = Path(__file__).resolve().parent / "md_vergleich_ergebnisse"
+output_directory.mkdir(parents=True, exist_ok=True)
 
 
-#
-# initialize simulation parameters
-#
-sim = SimulationParameters(
-    dt=dt,
-    n_steps=n_steps,
-    temperature=temperature,
-    box_length=box_length,
-    tau_thermostat=tau_thermostat,
-    rij_min=rij_min,
-    r_cut=r_cut
+# ---------------------------------------------------------------------------
+# Small helper functions
+# ---------------------------------------------------------------------------
+def set_argon_parameters(ps):
+    ps.mass[:] = mass_argon
+    ps.sigma[:] = sigma_argon
+    ps.epsilon[:] = epsilon_argon
+
+
+def initialize_safe_positions(ps):
+    """Random positions with a minimum initial distance of one sigma."""
+
+    positions = np.empty((ps.n, 3))
+    minimum_distance_squared = sigma_argon**2
+
+    for particle_index in range(ps.n):
+        for _ in range(100000):
+            candidate = np.random.uniform(0.0, box_length, size=3)
+
+            if particle_index == 0:
+                positions[particle_index] = candidate
+                break
+
+            displacement = positions[:particle_index] - candidate
+            displacement -= box_length * np.rint(displacement / box_length)
+            distance_squared = np.einsum(
+                "ij,ij->i",
+                displacement,
+                displacement,
+            )
+
+            if np.all(distance_squared >= minimum_distance_squared):
+                positions[particle_index] = candidate
+                break
+        else:
+            raise RuntimeError("Could not create safe initial positions")
+
+    ps.position[:] = positions
+
+
+def make_simulation(cutoff_factor, steps):
+    return SimulationParameters(
+        dt=dt,
+        n_steps=steps,
+        temperature=temperature,
+        box_length=box_length,
+        tau_thermostat=tau_thermostat,
+        rij_min=rij_min,
+        r_cut=cutoff_factor * sigma_argon,
+    )
+
+
+def full_reference_error(ps, sim):
+    """Errors of the force/energy actually used versus all particle pairs."""
+
+    full_force, full_energy, _ = calculate_all_pairs_reference(
+        ps,
+        sim,
+        apply_cutoff=False,
+    )
+    reference_norm = np.linalg.norm(full_force)
+    force_error_percent = (
+        100.0 * np.linalg.norm(ps.force - full_force) / reference_norm
+        if reference_norm > 0.0
+        else np.nan
+    )
+    energy_error = abs(potential_energy(ps, sim) - full_energy)
+    return float(force_error_percent), float(energy_error)
+
+
+def german_number(value):
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if not np.isfinite(value):
+        return ""
+    return format(float(value), ".15g").replace(".", ",")
+
+
+def write_german_csv(filename, header, rows):
+    with open(filename, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(header)
+        for row in rows:
+            writer.writerow([german_number(value) for value in row])
+
+
+def check_finite(ps, context):
+    if not all(
+        np.all(np.isfinite(values))
+        for values in (ps.position, ps.velocity, ps.force)
+    ):
+        raise FloatingPointError(f"Non-finite state during {context}")
+
+
+# ---------------------------------------------------------------------------
+# Create the same equilibrated start state for every separate run
+# ---------------------------------------------------------------------------
+print("Creating common equilibrated state...", flush=True)
+np.random.seed(initial_seed)
+
+sim_equilibration = make_simulation(3.0, n_equil_steps)
+ps_equilibration = ParticleSystem(n_particles)
+set_argon_parameters(ps_equilibration)
+initialize_safe_positions(ps_equilibration)
+initialize_velocities(ps_equilibration, temperature)
+update_neighbour_list(
+    ps_equilibration,
+    sim_equilibration,
+    step=0,
+    n_update=1,
 )
+calculate_force(ps_equilibration, sim_equilibration)
 
-#
-# initialize ParticleSystem 
-#
+for step in range(1, n_equil_steps + 1):
+    simulate_NVT_step(ps_equilibration, sim_equilibration, step, 1)
+
+    if step % 100 == 0:
+        check_finite(ps_equilibration, f"equilibration step {step}")
+        current_temperature = instantaneous_temperature(ps_equilibration)
+        if current_temperature > 10.0 * temperature:
+            raise FloatingPointError(
+                "Unstable temperature during equilibration: "
+                f"{current_temperature:.3e} K"
+            )
+
+check_finite(ps_equilibration, "equilibration")
+
+
+# ---------------------------------------------------------------------------
+# Initialize the selected production case from that state
+# ---------------------------------------------------------------------------
+sim = make_simulation(r_cut_factor, n_steps)
 ps = ParticleSystem(n_particles)
-
-# fill in the parameters for argon
-ps.mass[:] = mass_argon
-ps.sigma[:] = sigma_argon
-ps.epsilon[:] = epsilon_argon
-
-# set initial positions
-initialize_positions(ps, sim.box_length)
-
-# set initial velocities     
-initialize_velocities(ps, sim.temperature)
-
-update_neighbour_list(ps, sim, step=0, n_update=n_update) #first create of list 
-
-# calculate force according to initial positions
+set_argon_parameters(ps)
+ps.position[:] = ps_equilibration.position
+ps.velocity[:] = ps_equilibration.velocity
+update_neighbour_list(ps, sim, step=0, n_update=n_update)
 calculate_force(ps, sim)
+np.random.seed(production_seed)
 
-# calculate box density
-rho = density(ps, sim)
-
-# calculate cutoff pair statistics for the initial configuration
-n_total, n_cut, percent_cut = cutoff_pair_statistics(ps, sim)
-
-print(f"r_cut = {sim.r_cut:.3f} nm")
-print(f"Pairs inside cutoff: {n_cut}/{n_total} ({percent_cut:.4f}%)")
-
-# calculate initial values of variable properties
-E_pot_init = potential_energy(ps, sim)
-E_kin_init = kinetic_energy(ps)
-T_init = instantaneous_temperature(ps)
-P_init = ideal_gas_pressure(ps, sim)
-
-# P/T is constant because N and V remain constant.
-pressure_per_kelvin = (
-    P_init / T_init
-    if T_init != 0.0
-    else 0.0
+print(
+    f"Running {scenario['label']}: "
+    f"r_cut={r_cut_factor:g} sigma, n_update={n_update}",
+    flush=True,
 )
 
-if simulation_only:
-    position_trajectory = None
-    energy_trajectory = None
 
-else:
-    # initialize position trajectory
-    position_trajectory = np.zeros(
+# ---------------------------------------------------------------------------
+# Production trajectory and periodically sampled reference errors
+# ---------------------------------------------------------------------------
+trajectory_rows = []
+error_rows = []
+pure_md_runtime = 0.0
+
+
+def store_trajectory(step):
+    e_pot = potential_energy(ps, sim)
+    e_kin = kinetic_energy(ps)
+    current_temperature = 2.0 * e_kin * 1e3 / (3.0 * ps.n * R)
+    trajectory_rows.append(
         (
-            sim.n_steps + 1,
-            n_particles,
-            3
+            step,
+            step * dt,
+            e_pot,
+            e_kin,
+            e_pot + e_kin,
+            current_temperature,
         )
     )
 
-    position_trajectory[0] = ps.position
 
-    # initialize energy trajectory
-    energy_trajectory = np.zeros(
-        (
-            sim.n_steps + 1,
-            4
-        )
+def store_error(step):
+    force_error, energy_error = full_reference_error(ps, sim)
+    error_rows.append(
+        (step, step * dt, force_error, energy_error)
     )
 
-    energy_trajectory[0, 0] = E_pot_init
-    energy_trajectory[0, 1] = E_kin_init
-    energy_trajectory[0, 2] = T_init
-    energy_trajectory[0, 3] = P_init
+
+store_trajectory(0)
+store_error(0)
+
+for step in range(1, n_steps + 1):
+    # Only this call contributes to the reported MD runtime.
+    start = time.perf_counter()
+    simulate_NVT_step(ps, sim, step, n_update)
+    pure_md_runtime += time.perf_counter() - start
+
+    store_trajectory(step)
+
+    # Also sample immediately before a rebuild, when the list is oldest.
+    oldest_list_step = (
+        n_update > 1
+        and step % n_update == n_update - 1
+    )
+
+    # The expensive all-pairs reference is outside the runtime measurement.
+    if (
+        step % diagnostic_interval == 0
+        or oldest_list_step
+        or step == n_steps
+    ):
+        store_error(step)
+
+    if step % max(1, n_steps // 10) == 0:
+        print(f"  step {step}/{n_steps}", flush=True)
+
+check_finite(ps, "production")
 
 
-#--------------------------------------------------
-#  The actual MD simulation
-#--------------------------------------------------
-print("Starting MD simulation...", flush=True)
+# ---------------------------------------------------------------------------
+# Save German Excel-compatible data
+# ---------------------------------------------------------------------------
+trajectory_file = output_directory / f"{scenario_name}_trajectory.csv"
+error_file = output_directory / f"{scenario_name}_errors.csv"
 
-md_start_time = time.perf_counter()
-# Measure only the MD simulation loop.
-tic()
-
-for i in range(sim.n_steps):
-    if NVT:
-        simulate_NVT_step(
-            ps,
-            sim,
-            i + 1,
-            n_update
-        )
-    else:
-        simulate_NVE_step(
-            ps,
-            sim,
-            i + 1,
-            n_update
-        )
-
-    # Only calculate and store output quantities when requested.
-    if not simulation_only:
-        position_trajectory[i + 1] = ps.position
-
-        # Calculate kinetic energy only once.
-        e_kin = kinetic_energy(ps)
-
-        current_temperature = (
-            2.0
-            * e_kin
-            * 1e3
-            / (3.0 * ps.n * R)
-        )
-
-        energy_trajectory[i + 1, 0] = (
-            potential_energy(ps, sim)
-        )
-
-        energy_trajectory[i + 1, 1] = e_kin
-
-        energy_trajectory[i + 1, 2] = (
-            current_temperature
-        )
-
-        energy_trajectory[i + 1, 3] = (
-            pressure_per_kelvin
-            * current_temperature
-        )
-
-    # Print progress every 10 percent.
-    if (i + 1) % max(
-        1,
-        sim.n_steps // 10
-    ) == 0:
-        percent = (
-            100
-            * (i + 1)
-            / sim.n_steps
-        )
-
-        print(
-            f"Step {i + 1}/{sim.n_steps} finished "
-            f"({percent:.0f}%)",
-            flush=True
-        )
-
-elapsed_time = toc()
-
-md_elapsed_time = (
-    time.perf_counter()
-    - md_start_time
+write_german_csv(
+    trajectory_file,
+    [
+        "step",
+        "time_ps",
+        "potential_energy_kJ_mol",
+        "kinetic_energy_kJ_mol",
+        "total_energy_kJ_mol",
+        "temperature_K",
+    ],
+    trajectory_rows,
+)
+write_german_csv(
+    error_file,
+    [
+        "step",
+        "time_ps",
+        "total_force_error_percent",
+        "total_potential_energy_error_kJ_mol",
+    ],
+    error_rows,
 )
 
-print(
-    "MD simulation finished. "
-    "Writing output files...",
-    flush=True
+
+# ---------------------------------------------------------------------------
+# Separate presentation figures for this case
+# ---------------------------------------------------------------------------
+trajectory = np.asarray(trajectory_rows, dtype=float)
+errors = np.asarray(error_rows, dtype=float)
+
+case_title = (
+    f"{scenario['label']}: "
+    rf"$r_\mathrm{{cut}}={r_cut_factor:g}\sigma$, "
+    rf"$n_\mathrm{{update}}={n_update}$"
+)
+time_label = (
+    "Simulation time [ps]\n"
+    f"Simulated duration: {n_steps * dt:g} ps | "
+    f"Pure MD computation time: {pure_md_runtime:.3f} s "
+    "(reference diagnostics excluded)"
 )
 
-print(
-    f"MD loop time: "
-    f"{elapsed_time:.6f} s"
+
+def save_single_plot(filename_suffix, title, ylabel, x_values, y_values):
+    figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
+    axis.plot(x_values, y_values)
+    axis.set_title(f"{title}\n{case_title}")
+    axis.set_xlabel(time_label)
+    axis.set_ylabel(ylabel)
+    axis.grid(True, alpha=0.25)
+    figure.savefig(
+        output_directory / f"{scenario_name}_{filename_suffix}.png",
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(figure)
+
+
+save_single_plot(
+    "potential_energy",
+    "Potential energy",
+    "Potential energy [kJ/mol]",
+    trajectory[:, 1],
+    trajectory[:, 2],
+)
+save_single_plot(
+    "kinetic_energy",
+    "Kinetic energy",
+    "Kinetic energy [kJ/mol]",
+    trajectory[:, 1],
+    trajectory[:, 3],
 )
 
-print(
-    f"Time per MD step: "
-    f"{elapsed_time / sim.n_steps:.6e} s"
+figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
+axis.plot(trajectory[:, 1], trajectory[:, 5])
+axis.axhline(300.0, color="0.35", linestyle="--", label="Target: 300 K")
+axis.set_title(f"Temperature\n{case_title}")
+axis.set_xlabel(time_label)
+axis.set_ylabel("Temperature [K]")
+axis.grid(True, alpha=0.25)
+axis.legend()
+figure.savefig(
+    output_directory / f"{scenario_name}_temperature.png",
+    dpi=300,
+    bbox_inches="tight",
 )
+plt.close(figure)
 
-print(
-    f"Neighbour-list rebuilds: "
-    f"{ps.neighbour_rebuilds}"
+figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
+axis.scatter(errors[:, 1], errors[:, 2], s=14)
+axis.axhline(1.0, color="0.35", linestyle="--", label="DOE limit: 1 %")
+axis.set_title(f"Total relative force error\n{case_title}")
+axis.set_xlabel(time_label)
+axis.set_ylabel("Total relative force error [%]")
+axis.grid(True, alpha=0.25)
+axis.legend()
+figure.savefig(
+    output_directory / f"{scenario_name}_force_error.png",
+    dpi=300,
+    bbox_inches="tight",
 )
+plt.close(figure)
 
-# Stop here when only the simulation is required.
-if simulation_only:
-    raise SystemExit
-
-print("Writing output files...", flush=True)
-
-
-#--------------------------------------
-# W R I T E    T R A J E C T O R I E S 
-#--------------------------------------
-# write position trajectory to file
-write_xyz_trajectory(file_name_base + "_pos.xyz", position_trajectory, atom_symbol="Ar")
-# write energy trajectory to file (binary and text)
-np.save(file_name_base + "_ene.npy", energy_trajectory)
-np.savetxt(file_name_base + "_ene.dat", energy_trajectory, fmt="%.6e", header="#E_pot  E_kin  T  P", comments='')
-
-
-#----------------------------------------------------
-# P L O T   E N E R G Y   T R A J E C T O R I E S
-#----------------------------------------------------
-
-# set time axis
-time_ps = np.arange(
-    sim.n_steps + 1
-) * sim.dt
-
-save_plot(
-    time_ps,
-    energy_trajectory[:, 0],
-    file_name_base + "_Epot.png",
-    "time [ps]",
-    "E_pot [kJ/mol]",
-    1
+figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
+axis.scatter(errors[:, 1], errors[:, 3], s=14)
+axis.set_title(f"Absolute potential-energy error\n{case_title}")
+axis.set_xlabel(time_label)
+axis.set_ylabel("Absolute potential-energy error [kJ/mol]")
+axis.grid(True, alpha=0.25)
+figure.savefig(
+    output_directory / f"{scenario_name}_potential_energy_error.png",
+    dpi=300,
+    bbox_inches="tight",
 )
-
-save_plot(
-    time_ps,
-    energy_trajectory[:, 1],
-    file_name_base + "_Ekin.png",
-    "time [ps]",
-    "E_kin [kJ/mol]",
-    100
-)
-
-save_plot(
-    time_ps,
-    energy_trajectory[:, 2],
-    file_name_base + "_T.png",
-    "time [ps]",
-    "T [K]",
-    100
-)
-
-save_plot(
-    time_ps,
-    energy_trajectory[:, 3],
-    file_name_base + "_P.png",
-    "time [ps]",
-    "P [Pa]",
-    200
-)
-
-#--------------------------------------
-# O U T P U T 
-#--------------------------------------
-    
+plt.close(figure)
 
 
-# calculate cutoff pair statistics for the final configuration
-n_total, n_cut, percent_cut = cutoff_pair_statistics(ps, sim)
+# ---------------------------------------------------------------------------
+# Compact numerical summary
+# ---------------------------------------------------------------------------
+maximum_force_error = float(np.nanmax(errors[:, 2]))
+maximum_energy_error = float(np.nanmax(errors[:, 3]))
+summary_file = output_directory / f"{scenario_name}_summary.txt"
 
-output_lines = []
+summary_lines = [
+    f"Scenario: {scenario['label']}",
+    f"r_cut = {r_cut_factor:g} sigma = {r_cut:.6f} nm",
+    f"n_update = {n_update}",
+    f"N = {n_particles}",
+    f"L = {box_length:g} nm",
+    f"dt = {dt:g} ps",
+    f"production time = {n_steps * dt:g} ps",
+    f"pure MD runtime = {pure_md_runtime:.9f} s",
+    f"maximum total force error = {maximum_force_error:.9g} %",
+    f"maximum potential-energy error = {maximum_energy_error:.9g} kJ/mol",
+    "Reference calculations and file output are excluded from the runtime.",
+]
+summary_file.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
-output_lines.append("")
-output_lines.append("----------------------------------------------------------")
-output_lines.append("Simulation parameters ")    
-output_lines.append("----------------------------------------------------------")
-output_lines.append(f"{'Number of particles:':<30}{ps.n:>10.0f} ")
-output_lines.append(f"{'Box length:':<30}{sim.box_length:>10.3e} nm")
-output_lines.append(f"{'Box volume:':<30}{sim.box_length**3:>10.3e} nm^3")
-output_lines.append(f"{'Density:':<30}{rho:>10.3e} g/cm^3")
-output_lines.append("")   
-output_lines.append(f"{'Time step:':<30}{sim.dt:>10.3f} ps")
-output_lines.append(f"{'Number of time steps:':<30}{sim.n_steps:>10.0f}")
-output_lines.append(f"{'Simulation time:':<30}{sim.n_steps * sim.dt :>10.3e} ps")
-output_lines.append("")   
-if NVT==True: 
-    output_lines.append(f"{'Ensemble:':<30}{'NVT':>10}")
-    output_lines.append(f"{'Thermostat temperature:':<30}{sim.temperature:>10.0f} K")
-    output_lines.append(f"{'Thermostat coupling:':<30}{sim.tau_thermostat:>10.3e} ps")
-else: 
-    output_lines.append(f"{'Ensemble:':<30}{'NVE':>10}")
-    output_lines.append(f"{'Initial velocities:':<30}{sim.temperature:>10.0f} K")
-
-output_lines.append("")     
-output_lines.append(f"{'Lower cutoff radius:':<30}{sim.rij_min:>10.3f} nm")
-output_lines.append(f"{'Upper cutoff radius:':<30}{sim.r_cut:>10.3f} nm")
-output_lines.append(f"{'Neighbour-list skin:':<30}"f"{ps.neighbour_skin:>10.3f} nm")
-output_lines.append(f"{'List update interval:':<30}"f"{n_update:>10}")
-output_lines.append(f"{'Neighbour-list rebuilds:':<30}"f"{ps.neighbour_rebuilds:>10}")
-output_lines.append(f"{'Total LJ pairs:':<30}{n_total:>10}")
-output_lines.append(f"{'Pairs inside cutoff:':<30}{n_cut:>10}")
-output_lines.append(f"{'Pairs inside cutoff [%]:':<30}{percent_cut:>10.4f}")
-
-output_lines.append("----------------------------------------------------------")
-if elapsed_time: 
-    time_per_time_step = elapsed_time/sim.n_steps
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    output_lines.append(f"{'Elapsed time:':<30}{elapsed_time:>10.3f} s")   
-    output_lines.append(f"{'Elapsed time per time step:':<30}{time_per_time_step:>10.3f} s")
-    output_lines.append(f"{'Time stamp:':<30}{now} s")
-output_lines.append("----------------------------------------------------------")
-output_lines.append("END")  
-output_lines.append("----------------------------------------------------------")
-
-# Print to screen
-for line in output_lines:
-    print(line)
-  
-# Write to file
-with open(file_name_base + ".out", "w") as f:
-    for line in output_lines:
-        f.write(line + "\n")    
+print("\n" + "\n".join(summary_lines), flush=True)
+print(f"Results written to: {output_directory}", flush=True)

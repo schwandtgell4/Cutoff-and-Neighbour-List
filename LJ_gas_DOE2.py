@@ -868,7 +868,6 @@ def save_error_comparison(
 def save_performance_landscape(
     summary,
     logarithmic_limits,
-    system_caption,
 ):
     """Save a 3D response surface for speedup and total force error."""
 
@@ -939,6 +938,22 @@ def save_performance_landscape(
         depthshade=False,
     )
 
+    # Mark the fastest DOE combination that satisfies the force-error limit.
+    acceptable_values = summary["acceptable"]
+    if acceptable_values.dtype != bool:
+        acceptable_values = (
+            acceptable_values.astype(str).str.lower() == "true"
+        )
+    acceptable_rows = summary.loc[acceptable_values].dropna(
+        subset=["cutoff_factor", "n_update", "speedup_median"]
+    )
+    optimum_was_marked = not acceptable_rows.empty
+    selected = (
+        acceptable_rows.nlargest(1, "speedup_median").iloc[0]
+        if optimum_was_marked
+        else None
+    )
+
     x_start = float(np.min(cutoff_grid))
     x_end = float(np.max(cutoff_grid))
     y_start = float(np.min(update_grid))
@@ -949,6 +964,36 @@ def save_performance_landscape(
         finite_speedup = speedup[valid]
         upper = max(1.0, float(np.max(finite_speedup)))
         z_end = upper * 1.06
+
+    if selected is not None:
+        selected_cutoff = float(selected["cutoff_factor"])
+        selected_update = float(selected["n_update"])
+        selected_speedup = float(selected["speedup_median"])
+        marker_speedup = min(
+            z_end,
+            selected_speedup + 0.035 * (z_end - z_start),
+        )
+        axis.plot(
+            [selected_cutoff, selected_cutoff],
+            [selected_update, selected_update],
+            [selected_speedup, marker_speedup],
+            color="#1976d2",
+            linewidth=1.4,
+            zorder=50,
+        )
+        axis.plot(
+            [selected_cutoff],
+            [selected_update],
+            [marker_speedup],
+            linestyle="none",
+            marker="*",
+            markersize=16,
+            markerfacecolor="#1976d2",
+            markeredgecolor="black",
+            markeredgewidth=1.0,
+            label="Selected DoE optimum",
+            zorder=60,
+        )
 
     cutoff_plane, update_plane = np.meshgrid(
         [x_start, x_end],
@@ -1009,7 +1054,7 @@ def save_performance_landscape(
         labelpad=10,
     )
     z_axis_label = (
-        r"Median speedup $S=t_\mathrm{orig}/t_\mathrm{opt}$ [$\times$]"
+        r"Median speedup $S=t_\mathrm{orig}/t_\mathrm{opt}$"
     )
     axis.set_xlim(x_start, x_end)
     axis.set_ylim(y_start, y_end)
@@ -1055,10 +1100,13 @@ def save_performance_landscape(
         color=(0.0, 0.0, 0.0, 0.0),
         labelcolor=(0.0, 0.0, 0.0, 0.0),
     )
-    axis.set_title(
-        "Performance landscape: height = speedup, colour = total force error",
-        pad=20,
-    )
+
+    if optimum_was_marked:
+        axis.legend(
+            loc="upper left",
+            bbox_to_anchor=(0.02, 0.95),
+            frameon=True,
+        )
 
     colour_mappable = plt.cm.ScalarMappable(
         norm=error_norm,
@@ -1074,26 +1122,10 @@ def save_performance_landscape(
     )
     colour_bar.set_label("Maximum total relative force error [%]")
 
-    fig.text(
-        0.5,
-        0.025,
-        (
-            system_caption
-            + "\n"
-            + " Black-edged dots are measured DOE combinations;"
-            + " the surface only connects these grid points."
-            + " The translucent plane is the unchanged original code"
-            + " at speedup = 1."
-        ),
-        ha="center",
-        va="bottom",
-        fontsize=9,
-        color="#444444",
-    )
     fig.subplots_adjust(
         left=0.02,
         right=0.90,
-        bottom=0.11,
+        bottom=0.03,
         top=0.91,
     )
 
@@ -1321,7 +1353,6 @@ def main():
     save_performance_landscape(
         summary,
         error_limits,
-        system_caption,
     )
 
     if optimum.empty:
