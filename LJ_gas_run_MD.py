@@ -32,7 +32,7 @@ from LJ_gas import (
 # ---------------------------------------------------------------------------
 # Select one case and run the file three times
 # ---------------------------------------------------------------------------
-scenario_name = "fast_inaccurate"
+scenario_name = "accurate"
 
 scenarios = {
     "accurate": {
@@ -41,7 +41,7 @@ scenarios = {
         "n_update": 1,
     },
     "optimal": {
-        "label": "Selected DOE candidate",
+        "label": "Selected DoE candidate",
         "r_cut_factor": 2.4,
         "n_update": 35,
     },

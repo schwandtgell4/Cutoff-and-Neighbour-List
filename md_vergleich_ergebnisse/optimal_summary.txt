@@ -1,0 +1,11 @@
+Scenario: Selected DoE candidate
+r_cut = 2.4 sigma = 0.816000 nm
+n_update = 35
+N = 2000
+L = 20 nm
+dt = 0.01 ps
+production time = 100 ps
+pure MD runtime = 8.985229426 s
+maximum total force error = 2.00226822 %
+maximum potential-energy error = 13.8020527 kJ/mol
+Reference calculations and file output are excluded from the runtime.

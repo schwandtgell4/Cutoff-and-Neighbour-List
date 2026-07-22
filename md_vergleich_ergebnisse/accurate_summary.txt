@@ -1,0 +1,11 @@
+Scenario: Accurate control
+r_cut = 3 sigma = 1.020000 nm
+n_update = 1
+N = 2000
+L = 20 nm
+dt = 0.01 ps
+production time = 100 ps
+pure MD runtime = 279.800534741 s
+maximum total force error = 0.479114913 %
+maximum potential-energy error = 6.36073403 kJ/mol
+Reference calculations and file output are excluded from the runtime.

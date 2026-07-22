@@ -1,79 +1,97 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.constants import R
 
-# Argon parameters used in the MD simulation
-sigma = 0.34                     # nm
-epsilon = 120.0 * R * 1e-3      # kJ/mol
 
-# Selected DOE cutoff
-r_cut_factor = 2.4
-r_cut = r_cut_factor * sigma
+# Reduced variables are used only to draw the characteristic LJ shape.
+# No numerical scale is shown because this is a conceptual illustration.
+r = np.linspace(0.82, 4.0, 2500)
+V = 4.0 * ((1.0 / r)**12 - (1.0 / r)**6)
 
-# Do not start at r = 0 because the potential diverges there
-r = np.linspace(0.28, 1.25, 2000)
-
-V = 4.0 * epsilon * (
-    (sigma / r)**12
-    - (sigma / r)**6
-)
-
-# Potential with the hard cutoff used in the simulation
-V_cut = np.where(r <= r_cut, V, 0.0)
-
-r_min = 2.0**(1.0 / 6.0) * sigma
+# Representative position of the cutoff. Its numerical value is deliberately
+# not shown in the figure.
+r_cut = 2.0
+V_at_cut = 4.0 * ((1.0 / r_cut)**12 - (1.0 / r_cut)**6)
 
 fig, ax = plt.subplots(figsize=(9, 5.5))
 
-ax.plot(r, V, linewidth=2.2, label="Lennard-Jones potential")
+blue = "#0b4db3"
+red = "#d62f1f"
+
+# True Lennard-Jones potential
+ax.plot(r, V, color=blue, linewidth=3.0)
+
+# Hard cutoff: the potential jumps to zero and remains zero afterwards.
 ax.plot(
-    r,
-    V_cut,
-    "--",
-    linewidth=2,
-    label="Potential with hard cutoff",
+    [r_cut, r_cut],
+    [V_at_cut, 0.0],
+    color=red,
+    linewidth=3.0,
+)
+ax.plot(
+    [r_cut, r.max()],
+    [0.0, 0.0],
+    color=red,
+    linewidth=3.0,
 )
 
-ax.axhline(0, color="black", linewidth=0.8)
-ax.axvline(
-    sigma,
-    color="grey",
-    linestyle=":",
-    label=r"$\sigma$",
+# Conceptual coordinate axes without ticks, values or units.
+ax.annotate(
+    "",
+    xy=(4.08, 0.0),
+    xytext=(0.76, 0.0),
+    arrowprops={"arrowstyle": "->", "color": "black", "linewidth": 1.8},
+    annotation_clip=False,
 )
-ax.axvline(
-    r_cut,
-    color="red",
-    linestyle="--",
-    label=rf"$r_{{cut}}={r_cut_factor}\sigma$",
+ax.annotate(
+    "",
+    xy=(0.78, 1.42),
+    xytext=(0.78, -1.15),
+    arrowprops={"arrowstyle": "->", "color": "black", "linewidth": 1.8},
+    annotation_clip=False,
 )
 
-ax.scatter(
-    r_min,
-    -epsilon,
+# Generic cutoff marker
+ax.plot(
+    [r_cut, r_cut],
+    [0.06, 0.58],
     color="black",
-    zorder=5,
-    label=r"Minimum $r=2^{1/6}\sigma$",
+    linewidth=1.6,
+    linestyle=(0, (2, 2)),
 )
 
-ax.axvspan(
+# Direct labels keep the graphic readable without a legend.
+ax.text(0.66, 1.42, r"$V(r)$", fontsize=22, fontweight="bold")
+ax.text(4.09, -0.08, r"$r$", fontsize=22, fontweight="bold")
+ax.text(
     r_cut,
-    r.max(),
-    color="grey",
-    alpha=0.12,
-    label="Neglected region",
+    0.62,
+    r"$r_{\mathrm{cut}}$",
+    fontsize=18,
+    ha="center",
+)
+ax.text(1.34, -0.58, "true potential", color=blue, fontsize=17)
+ax.text(2.45, 0.13, "truncated potential", color=red, fontsize=17)
+
+ax.annotate(
+    "discontinuity",
+    xy=(r_cut, 0.5 * V_at_cut),
+    xytext=(2.62, -0.40),
+    fontsize=16,
+    arrowprops={"arrowstyle": "->", "color": "black", "linewidth": 1.6},
 )
 
-# Limit the visible repulsive branch so that the minimum remains readable
-ax.set_ylim(-1.2 * epsilon, 2.0 * epsilon)
-ax.set_xlim(r.min(), r.max())
+ax.set_xlim(0.70, 4.15)
+ax.set_ylim(-1.22, 1.50)
+ax.set_xticks([])
+ax.set_yticks([])
 
-ax.set_xlabel(r"Particle distance $r$ [nm]")
-ax.set_ylabel(r"Lennard-Jones potential $V_{\mathrm{LJ}}(r)$ [kJ/mol]")
-ax.set_title("Lennard-Jones potential of argon")
-ax.grid(alpha=0.25)
-ax.legend()
+for spine in ax.spines.values():
+    spine.set_visible(False)
 
 fig.tight_layout()
-fig.savefig("LJ_potential_argon.png", dpi=300, bbox_inches="tight")
+fig.savefig(
+    "LJ_potential_cutoff_concept.png",
+    dpi=300,
+    bbox_inches="tight",
+)
 plt.show()
