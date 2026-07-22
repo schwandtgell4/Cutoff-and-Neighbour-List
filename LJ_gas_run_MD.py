@@ -32,7 +32,7 @@ from LJ_gas import (
 # ---------------------------------------------------------------------------
 # Select one case and run the file three times
 # ---------------------------------------------------------------------------
-scenario_name = "accurate"
+scenario_name = "fast_inaccurate"
 
 scenarios = {
     "accurate": {
@@ -331,23 +331,15 @@ write_german_csv(
 trajectory = np.asarray(trajectory_rows, dtype=float)
 errors = np.asarray(error_rows, dtype=float)
 
-case_title = (
-    f"{scenario['label']}: "
-    rf"$r_\mathrm{{cut}}={r_cut_factor:g}\sigma$, "
-    rf"$n_\mathrm{{update}}={n_update}$"
-)
 time_label = (
     "Simulation time [ps]\n"
-    f"Simulated duration: {n_steps * dt:g} ps | "
-    f"Pure MD computation time: {pure_md_runtime:.3f} s "
-    "(reference diagnostics excluded)"
+    f"Pure MD computation time: {pure_md_runtime:.3f} s"
 )
 
 
-def save_single_plot(filename_suffix, title, ylabel, x_values, y_values):
+def save_single_plot(filename_suffix, ylabel, x_values, y_values):
     figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
     axis.plot(x_values, y_values)
-    axis.set_title(f"{title}\n{case_title}")
     axis.set_xlabel(time_label)
     axis.set_ylabel(ylabel)
     axis.grid(True, alpha=0.25)
@@ -361,14 +353,12 @@ def save_single_plot(filename_suffix, title, ylabel, x_values, y_values):
 
 save_single_plot(
     "potential_energy",
-    "Potential energy",
     "Potential energy [kJ/mol]",
     trajectory[:, 1],
     trajectory[:, 2],
 )
 save_single_plot(
     "kinetic_energy",
-    "Kinetic energy",
     "Kinetic energy [kJ/mol]",
     trajectory[:, 1],
     trajectory[:, 3],
@@ -377,7 +367,6 @@ save_single_plot(
 figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
 axis.plot(trajectory[:, 1], trajectory[:, 5])
 axis.axhline(300.0, color="0.35", linestyle="--", label="Target: 300 K")
-axis.set_title(f"Temperature\n{case_title}")
 axis.set_xlabel(time_label)
 axis.set_ylabel("Temperature [K]")
 axis.grid(True, alpha=0.25)
@@ -392,7 +381,6 @@ plt.close(figure)
 figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
 axis.scatter(errors[:, 1], errors[:, 2], s=14)
 axis.axhline(1.0, color="0.35", linestyle="--", label="DOE limit: 1 %")
-axis.set_title(f"Total relative force error\n{case_title}")
 axis.set_xlabel(time_label)
 axis.set_ylabel("Total relative force error [%]")
 axis.grid(True, alpha=0.25)
@@ -406,7 +394,6 @@ plt.close(figure)
 
 figure, axis = plt.subplots(figsize=(9, 5.5), constrained_layout=True)
 axis.scatter(errors[:, 1], errors[:, 3], s=14)
-axis.set_title(f"Absolute potential-energy error\n{case_title}")
 axis.set_xlabel(time_label)
 axis.set_ylabel("Absolute potential-energy error [kJ/mol]")
 axis.grid(True, alpha=0.25)

@@ -5,7 +5,7 @@ N = 2000
 L = 20 nm
 dt = 0.01 ps
 production time = 100 ps
-pure MD runtime = 279.800534741 s
+pure MD runtime = 277.616687926 s
 maximum total force error = 0.479114913 %
 maximum potential-energy error = 6.36073403 kJ/mol
 Reference calculations and file output are excluded from the runtime.
